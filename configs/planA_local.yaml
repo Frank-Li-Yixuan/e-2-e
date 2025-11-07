@@ -1,0 +1,82 @@
+seed: 42
+device: auto
+
+model:
+  backbone:
+    enabled: true
+    hf_model_id: hustvl/yolos-tiny
+  detector:
+    name: face_plate_hybrid   # faces via InsightFace + plates via YOLO
+    conf_threshold: 0.25      # lower for recall on small plates/faces
+    nms_iou: 0.5
+    plate_model_path: models/plate_yolo11_best.pt
+  generator:
+    backend: diffusers
+    diffusers:
+      model_id: stabilityai/stable-diffusion-2-inpainting
+      steps: 20
+      guidance_scale: 7.5
+      prompt_token_limit: 72  # stricter headroom under CLIP 77 token hard limit (includes specials)
+      mask_dilate: 4  # default dilation
+      mask_dilate_face: 4
+      mask_dilate_plate: 6
+      min_plate_size: 320      # upscale plate ROI min short side to improve character details
+      roi_pad_ratio: 0.25      # add context around plate box during ROI inpainting
+      plate_steps: 28          # boost fidelity for plates
+      plate_guidance: 8.5      # stronger guidance to encourage alphanumerics
+      plate_pattern: LLLDDDD    # pattern: L=letter, D=digit; used to generate random anonymized sequence
+      plate_retry_max: 2        # max retries if OCR quality insufficient
+      plate_min_ocr_chars: 4    # minimum recognized alphanumeric chars to accept
+      plate_seed_shuffle: true  # shuffle seed each retry for diversity
+      plate_styles:
+        CN:
+          pattern: LLDDLLD
+          prompt_hint: "Chinese license plate, blue background with white reflective letters"
+        EU:
+          pattern: LLLDDDD
+          prompt_hint: "European Union license plate, white reflective background, black letters, blue country strip"
+        US:
+          pattern: LLLDDDD
+          prompt_hint: "US style license plate, white background, dark embossed letters, state slogan subtle"
+        DE:
+          pattern: LL-DDDD
+          prompt_hint: "German license plate, white reflective background, black letters, blue EU strip, dash separator"
+        FR:
+          pattern: LL-DDDD
+          prompt_hint: "French license plate, white reflective background, black letters, blue regional strip"
+      # Optional: restrict to some styles for a dataset/domain
+      plate_style_whitelist: [CN]
+      # Geometry-based quality heuristic (character layout)
+      plate_geom_min_chars: 4     # min connected components that look like characters
+      plate_geom_max_chars: 9     # max components
+      plate_geom_y_std_max: 0.08  # normalized y-center std (by ROI height); smaller -> better alignment
+      plate_geom_h_std_max: 0.35  # normalized height std across components; smaller -> more uniform
+      plate_geom_retry_max: 1     # extra retries allowed when geometry check fails
+      plate_geom_last_resort_enhance: true  # apply mild contrast/sharpen if still failing
+      # Optional second-pass text anchoring to enforce exact char count/clarity (CN template)
+      plate_text_anchor: true
+      plate_text_anchor_strength: 0.22   # lower -> preserve rendered text more (tuned for CN template retention)
+      plate_text_font_ratio: 0.5         # font size as fraction of ROI height
+      plate_text_margin_ratio: 0.12      # left/right margin fraction of ROI width
+      plate_text_anchor_blur_sigma: 0.7
+      plate_text_font_ratio_min: 0.38    # narrower range for consistent stroke weight
+      plate_text_font_ratio_max: 0.58
+      plate_text_anchor_retry_max: 2
+      plate_text_anchor_font_step: 0.06
+      plate_text_local_sharpen_alpha: 1.25
+      plate_text_local_sharpen_beta: 0.0
+      plate_aspect_blue: 3.14            # CN blue plate aspect target
+      plate_aspect_green: 3.43           # CN NEV green plate aspect target
+      plate_aspect_correct_strength: 0.35
+  # International mode for CN renderer: drop province, feather edges, slight perspective jitter
+  plate_cn_use_province: false       # use CN layout but remove province char for international style
+  plate_feather_px: 2                # feather radius for plate patch blending
+  plate_perspective_jitter_deg: 1.5  # small random perspective skew
+  finetune:
+    use_lora: false  # planA: no training, inference only
+
+inference:
+  output_dir: outputs/anonymized_e2e
+
+paths:
+  outputs: F:\Datasets\anony-project\outputs\planA

@@ -1,0 +1,51 @@
+services:
+  eval:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: anony-eval:cu124
+    gpus: all
+    shm_size: 2g
+    environment:
+      - REPO_DIR=/workspace
+      - MAX_IMAGES=${MAX_IMAGES:-2000}
+      - BATCH_SIZE_DET=${BATCH_SIZE_DET:-16}
+      - DETECTOR_NAME=${DETECTOR_NAME:-yolov11_combo}
+      - ENABLE_DEEPPRIVACY2=${ENABLE_DEEPPRIVACY2:-0}
+      - ENABLE_LDFA=${ENABLE_LDFA:-0}
+      - PLATE_MODEL_PATH=${PLATE_MODEL_PATH:-/workspace/models/plate_yolo11_best.pt}
+    volumes:
+      - .:/workspace
+      - "${HOST_DATA_DIR:-F:\\Datasets}:/host_data:ro"
+    working_dir: /workspace
+    command: bash -lc "bash scripts/colab_eval.sh"
+
+  train:
+    platform: linux/amd64
+    image: anony-eval:cu124
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    gpus: all
+    shm_size: 8g
+    environment:
+      - REPO_DIR=/workspace
+      - COCO_JSON=${COCO_JSON:-/host_data/CCPD2020/ccpd_coco.json}
+      - IMAGES_ROOT=${IMAGES_ROOT:-/host_data/CCPD2020}
+    volumes:
+      - .:/workspace
+      - "${HOST_DATA_DIR:-F:\\Datasets}:/host_data:ro"
+    working_dir: /workspace
+    command: >
+      bash -lc "
+      python scripts/export_coco_to_yolo.py \
+        --coco_json ${COCO_JSON} \
+        --images_root ${IMAGES_ROOT} \
+        --out_dir outputs/datasets/plate_yolo11 && \
+      python scripts/train_plate_yolo11.py \
+        --data_yaml data/plate_yolo11.yaml \
+        --epochs ${EPOCHS:-50} \
+        --imgsz ${IMG_SIZE:-640} \
+        --batch ${BATCH:-16} \
+        --device ${DEVICE:-0}"

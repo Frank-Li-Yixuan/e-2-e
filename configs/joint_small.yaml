@@ -1,0 +1,100 @@
+# Small config for joint anonymization training
+# Adjust paths to your local datasets
+
+seed: 42
+
+device: auto  # auto | cpu | cuda (auto: use CUDA when available)
+precision: fp32  # fp32 | fp16 | bf16 (keep fp32 locally; will use AMP when CUDA+fp16)
+
+paths:
+  images: f:/Datasets
+  train_images: f:/Datasets
+  train_masks: data/masks               # optional, used for supervised mask training or pretraining
+  train_annotations: data/unified/unified_train.json
+  val_images: f:/Datasets
+  val_masks: data/masks
+  val_annotations: data/unified/unified_val.json
+  pseudotargets: data/pseudotargets     # optional ground-truth anonymized targets for supervised pretraining
+  outputs: outputs/joint_small
+
+categories:
+  - { id: 1, name: face }
+  - { id: 2, name: license_plate }
+
+model:
+  detector:
+    name: face_insight    # face_insight | yolos | detr
+    pretrained: true
+    hf_model_id: hustvl/yolos-tiny
+    conf_threshold: 0.5
+    nms_iou: 0.5
+    target_class_names: ["face", "person"]  # flexible; used when model is open-vocab or mapped
+  generator:
+    backend: unet   # unet | diffusers (use lightweight UNet locally)
+    in_channels: 4  # 3 + 1 mask
+    base_channels: 32
+    use_skip: true
+    diffusers:
+      model_id: runwayml/stable-diffusion-inpainting
+      torch_compile: false
+      enable_xformers: false
+      enable_lora: false  # if true, attempt lightweight LoRA finetune
+    finetune:
+      use_lora: true
+      learnable_layers: ['unet.up_blocks[-1]']
+  discriminator:
+    enabled: true
+    base_channels: 32
+    spectral_norm: true
+
+loss:
+  l1_weight: 1.0
+  perceptual_weight: 0.1
+  id_suppress_weight: 0.0     # keep 0 locally to avoid ONNX/ArcFace overhead every step; we will measure ID suppression in eval
+  adv_weight: 0.05
+
+train:
+  epochs: 2
+  batch_size: 1
+  num_workers: 0
+  grad_accum_steps: 1
+  max_steps: null    # override to cap total steps
+  optimizer: adamw
+  lr:
+    detector: 1.0e-5
+    generator: 2.0e-4
+    discriminator: 2.0e-4
+  alternating:
+    det_steps: 1
+    gen_steps: 1
+    disc_steps: 1
+  pretrain:
+    enabled: true
+    steps: 50        # supervised to pseudotargets (if available)
+
+checkpoint:
+  save_every_steps: 200
+  keep_last_k: 3
+  resume: outputs/joint_small/pretrain_checkpoint.pt
+
+eval:
+  run_on_val_every_steps: 0
+  max_images: 50
+  metrics:
+    arcface: false
+    easyocr: false
+    fid: false
+    map: false
+  face_only: true
+  categories:
+    - { id: 1, name: face }
+    - { id: 2, name: license_plate }
+
+inference:
+  output_dir: outputs/anonymized
+  save_masks: true
+  save_overlays: true
+
+data:
+  image_size: 256
+  normalize: true

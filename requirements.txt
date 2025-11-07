@@ -1,0 +1,39 @@
+# Core
+torch
+torchvision
+torchaudio
+
+# Transformers / detection
+transformers>=4.41.0
+accelerate>=0.33.0
+timm>=0.9.0
+safetensors>=0.4.2
+
+# Diffusion inpainting
+diffusers>=0.27.0
+xformers; platform_system == "Linux"
+
+# Vision / utils
+opencv-python
+Pillow
+numpy
+scikit-image
+matplotlib
+pyyaml
+tqdm
+
+# Metrics / eval
+pytorch-fid
+lpips
+
+# OCR & ID suppression
+easyocr
+insightface
+onnxruntime
+# onnxruntime-gpu  # optional on Colab if desired
+
+# COCO tools (use official wheels on all platforms)
+pycocotools>=2.0.7
+
+# Detectors
+ultralytics

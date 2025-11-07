@@ -1,0 +1,26 @@
+# configs/eval_thresholds.yaml
+
+detection:
+  ap50_drop_warn: 0.10   # relative drop (10%) -> WARN
+  ap50_drop_fail: 0.20   # >20% -> FAIL
+
+perceptual:
+  fid_warn: 50.0
+  fid_fail: 100.0
+  lpips_warn: 0.20
+  lpips_fail: 0.35
+
+deid:
+  arcface_mean_warn: 0.45   # mean cosine similarity target: <= 0.45 acceptable
+  arcface_mean_fail: 0.6
+  easyocr_drop_warn: 0.5    # easyocr accuracy drop >=50% -> WARN
+  easyocr_drop_fail: 0.8    # >=80% -> FAIL
+
+runtime:
+  fps_warn: 5.0
+  fps_fail: 1.0
+
+size_bins:
+  # short_side thresholds (px)
+  small: 16
+  medium: 64

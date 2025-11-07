@@ -1,0 +1,94 @@
+seed: 42
+device: auto
+precision: fp16
+paths:
+  images: f:/Datasets
+  train_images: f:/Datasets
+  train_masks: data/masks
+  train_annotations: data/unified/unified_train.json
+  val_images: f:/Datasets
+  val_masks: data/masks
+  val_annotations: data/unified/unified_val.json
+  pseudotargets: data/pseudotargets
+  outputs: outputs\joint_high_20251105_021025
+categories:
+- id: 1
+  name: face
+- id: 2
+  name: license_plate
+model:
+  detector:
+    name: face_insight
+    pretrained: true
+    hf_model_id: hustvl/yolos-tiny
+    conf_threshold: 0.5
+    nms_iou: 0.5
+    target_class_names:
+    - face
+    - person
+  generator:
+    backend: unet
+    in_channels: 4
+    base_channels: 48
+    use_skip: true
+    diffusers:
+      model_id: runwayml/stable-diffusion-inpainting
+      torch_compile: false
+      enable_xformers: false
+      enable_lora: false
+    finetune:
+      use_lora: true
+      learnable_layers:
+      - unet.up_blocks[-1]
+  discriminator:
+    enabled: true
+    base_channels: 48
+    spectral_norm: true
+loss:
+  l1_weight: 1.0
+  perceptual_weight: 0.1
+  id_suppress_weight: 0.0
+  adv_weight: 0.05
+train:
+  epochs: 24
+  batch_size: 4
+  num_workers: 2
+  grad_accum_steps: 1
+  max_steps: null
+  optimizer: adamw
+  lr:
+    detector: 1.0e-05
+    generator: 0.0002
+    discriminator: 0.0002
+  alternating:
+    det_steps: 1
+    gen_steps: 1
+    disc_steps: 1
+  pretrain:
+    enabled: true
+    steps: 50
+checkpoint:
+  save_every_steps: 2000
+  keep_last_k: 3
+  resume: F:\Datasets\anony-project\outputs\joint_small\generator_step1200.pt
+eval:
+  run_on_val_every_steps: 0
+  max_images: 50
+  metrics:
+    arcface: false
+    easyocr: false
+    fid: false
+    map: false
+  face_only: true
+  categories:
+  - id: 1
+    name: face
+  - id: 2
+    name: license_plate
+inference:
+  output_dir: outputs/anonymized
+  save_masks: true
+  save_overlays: true
+data:
+  image_size: 384
+  normalize: true
