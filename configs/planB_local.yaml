@@ -1,0 +1,65 @@
+seed: 42
+device: auto
+
+model:
+  backbone:
+    enabled: true
+    hf_model_id: hustvl/yolos-tiny
+  detector:
+    name: face_plate_hybrid
+    conf_threshold: 0.30
+    nms_iou: 0.5
+    plate_model_path: models/plate_yolo11_best.pt
+  generator:
+    backend: diffusers
+    diffusers:
+      # Keep SD 2.0 inpainting for wide availability; SDXL inpaint requires more VRAM
+      model_id: stabilityai/stable-diffusion-2-inpainting
+      steps: 32               # a bit higher than planA for extra detail
+      guidance_scale: 7.5
+      prompt_token_limit: 68  # extra headroom to avoid CLIP 77-token warning
+      mask_dilate: 4
+      mask_dilate_face: 4
+      mask_dilate_plate: 6
+      min_plate_size: 352     # slightly larger ROI short side to help crisp text
+      roi_pad_ratio: 0.25
+      plate_steps: 32
+      plate_guidance: 8.0
+      plate_pattern: LLLDDDD
+      plate_retry_max: 2
+      plate_min_ocr_chars: 4
+      plate_seed_shuffle: true
+      plate_styles:
+        CN:
+          pattern: LLDDLLD
+          prompt_hint: "Chinese license plate, blue background with white reflective letters"
+      plate_style_whitelist: [CN]
+      # Geometry heuristics
+      plate_geom_min_chars: 4
+      plate_geom_max_chars: 9
+      plate_geom_y_std_max: 0.08
+      plate_geom_h_std_max: 0.32
+      plate_geom_retry_max: 2
+      plate_geom_last_resort_enhance: true
+      # Text anchoring
+      plate_text_anchor: true
+      plate_text_anchor_strength: 0.22
+      plate_text_font_ratio: 0.5
+      plate_text_margin_ratio: 0.12
+      plate_text_anchor_blur_sigma: 0.7
+      plate_text_font_ratio_min: 0.38
+      plate_text_font_ratio_max: 0.58
+      plate_text_anchor_retry_max: 2
+      plate_text_anchor_font_step: 0.06
+      plate_text_local_sharpen_alpha: 1.25
+      plate_text_local_sharpen_beta: 0.0
+      # Aspect correction + international toggle
+      plate_aspect_blue: 3.14
+      plate_aspect_green: 3.43
+      plate_aspect_correct_strength: 0.35
+      plate_cn_use_province: false
+      plate_feather_px: 2
+      plate_perspective_jitter_deg: 1.5
+
+paths:
+  outputs: F:\\Datasets\\anony-project\\outputs\\planB_local

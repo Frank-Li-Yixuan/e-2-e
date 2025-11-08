@@ -1,0 +1,44 @@
+﻿# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual env
+.venv*/
+venv/
+env/
+
+# Datasets / large raw data
+Datasets/
+CCPD2020/
+PP4AV/
+WiderFace/
+
+data/images/
+data/masks/
+data/unified/
+
+# Outputs / logs / runs
+outputs/
+runs/
+logs/
+status/
+
+# Checkpoints / weights
+*.pt
+*.onnx
+*.ckpt
+*.safetensors
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Cache
+.cache/
+wandb/

@@ -1,0 +1,18 @@
+seed: 42
+device: auto
+
+model:
+  detector:
+    name: yolo_plate
+    conf_threshold: 0.25
+    nms_iou: 0.5
+    plate_model_path: models/plate_yolo11_best.pt
+  generator:
+    backend: diffusers
+    diffusers:
+      model_id: stabilityai/stable-diffusion-2-inpainting
+      steps: 20
+      guidance_scale: 7.5
+
+inference:
+  output_dir: outputs/anonymized_e2e

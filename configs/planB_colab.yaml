@@ -1,0 +1,113 @@
+seed: 42
+device: auto
+precision: fp16
+
+model:
+  backbone:
+    enabled: true
+    hf_model_id: hustvl/yolos-tiny
+  detector:
+    name: face_plate_hybrid
+    conf_threshold: 0.35
+    nms_iou: 0.5
+    plate_model_path: models/plate_yolo11_best.pt
+  generator:
+    backend: diffusers
+    diffusers:
+      model_id: stabilityai/stable-diffusion-2-inpainting  # 可替换为 SDXL inpaint 若显存允许
+      steps: 30
+      guidance_scale: 7.0
+      mask_dilate: 4
+      enable_xformers: true
+      prompt_token_limit: 68
+      # 国际车牌风格支持
+      plate_intl_aspect: 4.73     # EU 520x110mm
+      plate_intl_eu_band: true    # 左侧蓝色EU标识条
+      plate_intl_border_ratio: 0.06
+      plate_styles:
+        CN:
+          pattern: 'L DDDDDD'
+          prompt_hint: 'Chinese license plate reflective blue or green background with embossed characters'
+          neg_hint: 'no blank, no plain rectangle'
+          aspect: 3.14
+        EU:
+          pattern: 'LLL DDDD'
+          prompt_hint: 'European Union style license plate, white reflective background, black FE-style characters, metal plate, bolts'
+          neg_hint: 'no blank, no toy plate'
+          aspect: 4.73
+        US:
+          pattern: 'LDDD LLL'
+          prompt_hint: 'US style license plate, embossed alphanumerics, realistic reflective background, bolts'
+          neg_hint: 'no blank, no toy plate'
+          aspect: 2.00
+      # plate_style_whitelist: ['EU']
+      # 车牌相关高质量推理参数（可选）
+      plate_steps: 34
+      plate_guidance: 8.0
+      plate_text_anchor: true
+      plate_text_anchor_strength: 0.20
+      plate_text_font_ratio: 0.5
+      plate_text_font_ratio_min: 0.38
+      plate_text_font_ratio_max: 0.58
+      plate_text_anchor_blur_sigma: 0.6
+      plate_text_anchor_retry_max: 2
+      plate_text_anchor_font_step: 0.06
+      plate_aspect_blue: 3.14
+      plate_aspect_green: 3.43
+      plate_aspect_correct_strength: 0.35
+      plate_cn_use_province: true
+      plate_feather_px: 2
+      plate_perspective_jitter_deg: 1.8
+    finetune:
+      use_lora: true
+      learnable_layers: ['unet.mid_block', 'unet.up_blocks[-1]', 'unet.down_blocks[0].attentions[0]']
+    train_prompt: "realistic anonymized appearance, consistent background lighting, natural materials"
+    train_prompt_face: "realistic anonymized face with natural skin texture"
+    train_prompt_plate: "randomized license plate characters, embossed alphanumerics on reflective metal plate"
+    negative_prompt: "low quality, artifacts, distorted, blank plate, no characters"
+  discriminator:
+    enabled: true
+    base_channels: 64
+    spectral_norm: true
+
+loss:
+  l1_weight: 0.5
+  perceptual_weight: 0.2
+  id_suppress_weight: 0.2
+  adv_weight: 0.08  # 略降对抗强度减少不稳定
+
+train:
+  epochs: 1
+  batch_size: 2
+  num_workers: 2
+  grad_accum_steps: 1
+  max_steps: 1000
+  optimizer: adamw
+  lr: {detector: 1.0e-05, generator: 1.0e-04, discriminator: 1.0e-04}
+  alternating: {det_steps: 1, gen_steps: 1, disc_steps: 1}
+  pretrain: {enabled: false, steps: 0}
+
+paths:
+  outputs: /content/outputs/planB
+  # 说明：以下四个路径可由脚本 scripts/colab_paths_autoset.py 自动写入覆盖文件 (例如 configs/paths_overlay.yaml)；
+  # 这里给出默认推荐：使用 unified COCO（包含多数据源）或直接指向某单一数据集。
+  # 选项 A (推荐统一合并)：
+  # train_images: /content/drive/MyDrive/datasets/unified/images   # 若使用合并方案，需要一个对应 images 根（可为空，依靠 file_name 相对路径）。
+  # train_annotations: /content/drive/MyDrive/datasets/unified/unified_train.json
+  # val_images: /content/drive/MyDrive/datasets/unified/images
+  # val_annotations: /content/drive/MyDrive/datasets/unified/unified_val.json
+  # 选项 B (只用 WiderFace + CCPD 示例):
+  # train_images: /content/drive/MyDrive/datasets/WiderFace/WIDER_train/WIDER_train/images
+  # train_annotations: /content/drive/MyDrive/datasets/WiderFace/widerface_train_coco.json
+  # val_images: /content/drive/MyDrive/datasets/WiderFace/WIDER_val/WIDER_val/images
+  # val_annotations: /content/drive/MyDrive/datasets/WiderFace/widerface_val_coco.json
+  # 选项 C (PP4AV 自建 COCO)：如果你把 pp4av_coco.json 上传到 data/ 则：
+  # train_images: /content/drive/MyDrive/datasets/PP4AV/images
+  # train_annotations: /content/drive/MyDrive/datasets/PP4AV/pp4av_coco.json
+  # val_images: /content/drive/MyDrive/datasets/WiderFace/WIDER_val/WIDER_val/images
+  # val_annotations: /content/drive/MyDrive/datasets/WiderFace/widerface_val_coco.json
+
+eval:
+  run_on_val_every_steps: 200
+  max_images: 50
+  metrics: {arcface: true, easyocr: true, fid: true, map: true}

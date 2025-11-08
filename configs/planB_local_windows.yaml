@@ -1,0 +1,97 @@
+seed: 42
+device: auto
+precision: fp16
+
+model:
+  backbone:
+    enabled: true
+    hf_model_id: hustvl/yolos-tiny
+  detector:
+    name: face_plate_hybrid
+    conf_threshold: 0.35
+    nms_iou: 0.5
+    plate_model_path: models/plate_yolo11_best.pt
+  generator:
+    backend: diffusers
+    diffusers:
+      model_id: stabilityai/stable-diffusion-2-inpainting
+      steps: 30
+      guidance_scale: 7.0
+      mask_dilate: 4
+      enable_xformers: true
+      prompt_token_limit: 68
+      plate_intl_aspect: 4.73
+      plate_intl_eu_band: true
+      plate_intl_border_ratio: 0.06
+      plate_styles:
+        CN:
+          pattern: 'L DDDDDD'
+          prompt_hint: 'Chinese license plate reflective blue or green background with embossed characters'
+          neg_hint: 'no blank, no plain rectangle'
+          aspect: 3.14
+        EU:
+          pattern: 'LLL DDDD'
+          prompt_hint: 'European Union style license plate, white reflective background, black FE-style characters, metal plate, bolts'
+          neg_hint: 'no blank, no toy plate'
+          aspect: 4.73
+        US:
+          pattern: 'LDDD LLL'
+          prompt_hint: 'US style license plate, embossed alphanumerics, realistic reflective background, bolts'
+          neg_hint: 'no blank, no toy plate'
+          aspect: 2.00
+      plate_steps: 34
+      plate_guidance: 8.0
+      plate_text_anchor: true
+      plate_text_anchor_strength: 0.20
+      plate_text_font_ratio: 0.5
+      plate_text_font_ratio_min: 0.38
+      plate_text_font_ratio_max: 0.58
+      plate_text_anchor_blur_sigma: 0.6
+      plate_text_anchor_retry_max: 2
+      plate_text_anchor_font_step: 0.06
+      plate_aspect_blue: 3.14
+      plate_aspect_green: 3.43
+      plate_aspect_correct_strength: 0.35
+      plate_cn_use_province: true
+      plate_feather_px: 2
+      plate_perspective_jitter_deg: 1.8
+    finetune:
+      use_lora: true
+      learnable_layers: ['unet.mid_block', 'unet.up_blocks[-1]', 'unet.down_blocks[0].attentions[0]']
+    train_prompt: "realistic anonymized appearance, consistent background lighting, natural materials"
+    train_prompt_face: "realistic anonymized face with natural skin texture"
+    train_prompt_plate: "randomized license plate characters, embossed alphanumerics on reflective metal plate"
+    negative_prompt: "low quality, artifacts, distorted, blank plate, no characters"
+  discriminator:
+    enabled: true
+    base_channels: 64
+    spectral_norm: true
+
+loss:
+  l1_weight: 0.5
+  perceptual_weight: 0.2
+  id_suppress_weight: 0.2
+  adv_weight: 0.08
+
+train:
+  epochs: 1
+  batch_size: 2
+  num_workers: 2
+  grad_accum_steps: 1
+  max_steps: 1000
+  optimizer: adamw
+  lr: {detector: 1.0e-05, generator: 1.0e-04, discriminator: 1.0e-04}
+  alternating: {det_steps: 1, gen_steps: 1, disc_steps: 1}
+  pretrain: {enabled: false, steps: 0}
+
+paths:
+  outputs: f:/Datasets/anony-project/outputs/planB
+  train_images: f:/Datasets
+  train_annotations: f:/Datasets/anony-project/data/unified/unified_train.json
+  val_images: f:/Datasets
+  val_annotations: f:/Datasets/anony-project/data/unified/unified_val.json
+
+eval:
+  run_on_val_every_steps: 200
+  max_images: 50
+  metrics: {arcface: true, easyocr: true, fid: true, map: true}
