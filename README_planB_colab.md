@@ -34,17 +34,26 @@
 - `model.discriminator.enabled: true`：使用判别器对匿名样本做对抗改进。
 - 损失权重：`l1_weight`, `perceptual_weight`, `id_suppress_weight`, `adv_weight` 可根据观察调节。
 
-### LoRA 可选扩展
-将 `learnable_layers` 扩展加入跨注意力层：
+### LoRA 可选扩展 (已内置)
+当前代码 (`generator_wrapper.py`) 已自动注入 LoRA：
+- 通过 `model.generator.finetune.use_lora: true` 开启。
+- 使用 `model.generator.finetune.lora_rank` 控制低秩 (默认 8)。
+- `learnable_layers` 用于过滤 UNet 中的注意力处理器名称 (匹配子串)。示例：
 ```yaml
-learnable_layers: ["unet.mid_block", "unet.up_blocks[-1]", "unet.down_blocks[0].attentions[0]"]
+finetune:
+	use_lora: true
+	lora_rank: 8
+	learnable_layers: ["unet.mid_block", "unet.up_blocks[-1]", "unet.down_blocks.0.attentions.0"]
 ```
-并控制 rank：在代码中包装参数时设置 `lora_rank` (需在 `generator_wrapper.py` 中添加 LoRA 注入逻辑)。
+若过滤结果为空，会自动回退启用全部注意力层的 LoRA。
+训练日志中会输出：`[LoRA] Enabled LoRA on UNet with rank=<r>, trainable params=<N>` 用于确认激活。
 
 ## 5. 运行训练
+推荐使用 Lightning 版本训练入口（若已迁移）：
 ```bash
-python -m src.train_joint --config configs/planB_colab.yaml --mode auto --max_steps 1000
+python -m src.train_pl --config configs/planB_colab.yaml --max_steps 1000
 ```
+旧的 `train_joint` 仍可用于早期非 Lightning 测试，但不包含最新验证与 LoRA 统计打印。
 阶段：
 1. (可选) 预训练：使用 pseudo targets 或自重建暖身。
 2. 联合交替：检测器 / 生成器 / 判别器 按 `alternating` 频率轮流更新。
@@ -91,7 +100,7 @@ python -m src.train_joint --config configs/planB_colab.yaml --mode auto --max_st
 # 写入 paths 覆盖（推荐使用 unified COCO；脚本会优先使用 data/unified/unified_*.json，若缺失则尝试合并 widerface+pp4av）
 %run scripts/colab_paths_autoset.py --mode auto
 # 运行训练：当前版本的训练入口仅接收一个 config，如需合并 overlay，可将 overlay 中 paths 内容手动拷贝进 configs/planB_colab.yaml 的 paths 段落，或替换为你自己的 config 副本。
-!python -m src.train_joint --config configs/planB_colab.yaml --mode auto --max_steps 500
+!python -m src.train_pl --config configs/planB_colab.yaml --max_steps 500
 ```
 
 ## 12. 安全与隐私注意

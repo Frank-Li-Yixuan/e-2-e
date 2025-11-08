@@ -92,6 +92,7 @@ model:
     finetune:
       use_lora: true
       learnable_layers: ['unet.mid_block', 'unet.up_blocks[-1]', 'unet.down_blocks[0].attentions[0]']
+      lora_rank: 8  # 新增：控制 LoRA 低秩大小，较小值(4-16)节省显存与加速
     train_prompt: "realistic anonymized appearance, consistent background lighting, natural materials"
     train_prompt_face: "realistic anonymized face with natural skin texture"
     train_prompt_plate: "randomized license plate characters, embossed alphanumerics on reflective metal plate"

@@ -102,28 +102,103 @@ class DiffusersInpaintBackend(nn.Module):
         except Exception:
             self.pipe = self.pipe.to(self.device)
         # optional LoRA lightweight finetune
+        self._trainable_params = []
         if self.finetune_cfg.get("use_lora", False):
             try:
-                from diffusers import AttnProcessor2_0  # type: ignore
-                import itertools
-                # enable trainable attention processors on selected layers
-                learnable = self.finetune_cfg.get("learnable_layers", ["unet.up_blocks[-1]"])
-                # switch attention processors to trainable module
-                self.pipe.unet.set_attn_processor(AttnProcessor2_0())
-                # collect parameters by layer name filter
-                params = []
-                for n, p in self.pipe.unet.named_parameters():
-                    if any(key in n for key in learnable):
-                        p.requires_grad_(True)
-                        params.append(p)
+                # Freeze everything by default (we'll only train LoRA)
+                self.pipe.unet.requires_grad_(False)
+                if hasattr(self.pipe, "text_encoder"):
+                    try:
+                        self.pipe.text_encoder.requires_grad_(False)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+                # Build per-attention processor LoRA modules
+                from diffusers.models.attention_processor import LoRAAttnProcessor  # type: ignore
+                from diffusers.training_utils import AttnProcsLayers  # type: ignore
+
+                r = int(self.finetune_cfg.get("lora_rank", 8))
+                learnable: List[str] = list(self.finetune_cfg.get("learnable_layers", []))
+
+                # Map each attention processor name to an appropriate LoRA processor
+                lora_attn_procs = {}
+                for name in list(self.pipe.unet.attn_processors.keys()):
+                    # name examples:
+                    #  'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor'
+                    #  'mid_block.attentions.0.transformer_blocks.0.attn2.processor'
+                    unet_scoped_name = f"unet.{name}"
+                    if len(learnable) > 0 and not any(patt in unet_scoped_name for patt in learnable):
+                        # skip layers not selected by user patterns
+                        continue
+
+                    # Determine cross_attention_dim and hidden_size per block
+                    cross_attention_dim = None if name.endswith("attn1.processor") else self.pipe.unet.config.cross_attention_dim
+                    if name.startswith("mid_block"):
+                        hidden_size = self.pipe.unet.config.block_out_channels[-1]
+                    elif name.startswith("up_blocks"):
+                        block_id = int(name[len("up_blocks."):].split(".")[0])
+                        hidden_size = list(reversed(self.pipe.unet.config.block_out_channels))[block_id]
+                    elif name.startswith("down_blocks"):
+                        block_id = int(name[len("down_blocks."):].split(".")[0])
+                        hidden_size = self.pipe.unet.config.block_out_channels[block_id]
                     else:
-                        p.requires_grad_(False)
-                self._trainable_params = params
+                        # default fallback
+                        hidden_size = self.pipe.unet.config.block_out_channels[0]
+
+                    lora_attn_procs[name] = LoRAAttnProcessor(
+                        hidden_size=hidden_size,
+                        cross_attention_dim=cross_attention_dim,
+                        rank=r,
+                    )
+
+                if len(lora_attn_procs) == 0:
+                    # If user patterns filter everything out, fallback to enabling all
+                    for name in list(self.pipe.unet.attn_processors.keys()):
+                        cross_attention_dim = None if name.endswith("attn1.processor") else self.pipe.unet.config.cross_attention_dim
+                        if name.startswith("mid_block"):
+                            hidden_size = self.pipe.unet.config.block_out_channels[-1]
+                        elif name.startswith("up_blocks"):
+                            block_id = int(name[len("up_blocks."):].split(".")[0])
+                            hidden_size = list(reversed(self.pipe.unet.config.block_out_channels))[block_id]
+                        elif name.startswith("down_blocks"):
+                            block_id = int(name[len("down_blocks."):].split(".")[0])
+                            hidden_size = self.pipe.unet.config.block_out_channels[block_id]
+                        else:
+                            hidden_size = self.pipe.unet.config.block_out_channels[0]
+                        lora_attn_procs[name] = LoRAAttnProcessor(
+                            hidden_size=hidden_size,
+                            cross_attention_dim=cross_attention_dim,
+                            rank=r,
+                        )
+
+                # Set LoRA processors into the UNet
+                self.pipe.unet.set_attn_processor(lora_attn_procs)
+
+                # Collect LoRA parameters only
+                lora_layers = AttnProcsLayers(self.pipe.unet.attn_processors)
+                # Ensure all LoRA params are trainable
+                for p in lora_layers.parameters():
+                    p.requires_grad_(True)
+                # Move LoRA layers to the same device/dtype as UNet
+                try:
+                    dtype_to_use = torch.float16 if (self.device.type == 'cuda') else torch.float32
+                    lora_layers.to(self.device, dtype=dtype_to_use)
+                except Exception:
+                    try:
+                        lora_layers.to(self.device)
+                    except Exception:
+                        pass
+                self._trainable_params = list(lora_layers.parameters())
+
+                # Optional info
+                try:
+                    n_train = sum(int(p.numel()) for p in self._trainable_params)
+                    print(f"[LoRA] Enabled LoRA on UNet with rank={r}, trainable params={n_train:,}")
+                except Exception:
+                    pass
             except Exception as e:
-                print(f"[WARN] LoRA/AttnProcessor not available for diffusers finetune: {e}")
+                print(f"[WARN] LoRA setup failed; continuing without LoRA: {e}")
                 self._trainable_params = []
-        else:
-            self._trainable_params = []
 
     def _trim_prompt(self, text: Optional[str]) -> Optional[str]:
         if text is None or text == "":

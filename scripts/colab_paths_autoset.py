@@ -134,6 +134,8 @@ def main():
     ap.add_argument('--drive-root', default=os.environ.get('DRIVE_ROOT','/content/drive/MyDrive'))
     ap.add_argument('--mode', default='auto', choices=['auto','unified-only','merge'])
     ap.add_argument('--output', default='configs/paths_overlay.yaml')
+    ap.add_argument('--images-root', default=None, help='Override images root for both train/val (e.g., /content/drive/MyDrive)')
+    ap.add_argument('--val-images-root', default=None, help='Optional override for val images root')
     args = ap.parse_args()
     repo_dir = Path('.')
     data_dir = repo_dir / 'data'
@@ -287,12 +289,15 @@ def main():
             # Generic fallback
             if drive_datasets.exists():
                 return str(drive_datasets)
+            if drive_root.exists():
+                return str(drive_root)
         except Exception:
             pass
         return str(repo_dir)
 
-    train_images_root = choose_images_root(Path(use_train_ann))
-    val_images_root = choose_images_root(Path(use_val_ann))
+    # Allow CLI override for images roots
+    train_images_root = args.images_root or choose_images_root(Path(use_train_ann))
+    val_images_root = args.val_images_root or args.images_root or choose_images_root(Path(use_val_ann))
 
     overlay = {
         'paths': {
@@ -308,6 +313,7 @@ def main():
         yaml.safe_dump(overlay, f, sort_keys=False, allow_unicode=True)
     print('[OK] paths overlay written to', args.output)
     print('[INFO] train_ann:', use_train_ann, 'val_ann:', use_val_ann)
+    print('[INFO] train_images_root:', train_images_root, 'val_images_root:', val_images_root)
 
 if __name__ == '__main__':
     main()
