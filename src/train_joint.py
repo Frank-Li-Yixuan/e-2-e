@@ -186,6 +186,34 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
 
     lcfg = cfg.get("loss", {})
 
+    # --- Schedulers: linear warmup + cosine decay ---
+    def make_scheduler(opt: Optional[optim.Optimizer], key: str):
+        if opt is None:
+            return None
+        scfg = cfg.get("schedule", {}).get(key, {})
+        warmup = int(scfg.get("warmup_steps", 0))
+        total = int(scfg.get("total_steps", cfg.get("train", {}).get("max_steps", 1000) or 1000))
+        min_scale = float(scfg.get("min_lr_scale", 0.1))
+        def lr_lambda(step: int):
+            if total <= 0:
+                return 1.0
+            if warmup > 0 and step < warmup:
+                return max(1e-6, (step + 1) / float(warmup))
+            # cosine decay after warmup
+            t = min(max(step - warmup, 0), max(total - warmup, 1))
+            cos = 0.5 * (1 + math.cos(math.pi * t / max(total - warmup, 1)))
+            return min_scale + (1 - min_scale) * cos
+        try:
+            return optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+        except Exception:
+            return None
+    sch_gen = make_scheduler(opt_gen, "generator")
+    sch_disc = make_scheduler(opt_disc, "discriminator")
+    sch_det = make_scheduler(opt_det, "detector")
+
+    # gradient clipping config
+    clip_norm = float(cfg.get("grad", {}).get("clip_norm", 0.0) or 0.0)
+
     def run_pretrain(max_steps: int) -> None:
         if opt_gen is None:
             return
@@ -302,6 +330,12 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
                         det_loss, det_scalars = detector.compute_loss(batch)
                         det_loss_val = float(det_loss.detach().cpu())
                     scaler.scale(det_loss).backward()
+                    if clip_norm > 0.0:
+                        try:
+                            scaler.unscale_(opt_det)
+                            torch.nn.utils.clip_grad_norm_(detector.parameters(), clip_norm)
+                        except Exception:
+                            pass
                     scaler.step(opt_det)
                     scaler.update()
 
@@ -317,6 +351,12 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
                         pred_fake = disc(fake.detach())
                         d_loss = adversarial_d_loss(pred_real, pred_fake)
                     scaler.scale(d_loss).backward()
+                    if clip_norm > 0.0:
+                        try:
+                            scaler.unscale_(opt_disc)
+                            torch.nn.utils.clip_grad_norm_(disc.parameters(), clip_norm)
+                        except Exception:
+                            pass
                     scaler.step(opt_disc)
                     scaler.update()
 
@@ -367,6 +407,12 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
                             recon = torch.nn.functional.l1_loss(fake, images)
                             loss = loss + 0.01 * recon
                     scaler.scale(loss).backward()
+                    if clip_norm > 0.0:
+                        try:
+                            scaler.unscale_(opt_gen)
+                            torch.nn.utils.clip_grad_norm_(generator.parameters(), clip_norm)
+                        except Exception:
+                            pass
                     scaler.step(opt_gen)
                     scaler.update()
 
@@ -476,6 +522,13 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
                     val_map,
                 ])
 
+            # step LR schedulers
+            try:
+                if sch_gen is not None: sch_gen.step()
+                if sch_disc is not None: sch_disc.step()
+                if sch_det is not None: sch_det.step()
+            except Exception:
+                pass
             # early cap
             if max_steps is not None and global_step >= int(max_steps):
                 break
