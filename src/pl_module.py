@@ -1,6 +1,9 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 import math
+import os
+from PIL import Image
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
@@ -47,6 +50,31 @@ class AnonyLightningModule(pl.LightningModule):
         self.lcfg = cfg.get("loss", {})
         # Use manual optimization to alternate optimizers
         self.automatic_optimization = False
+        # Validation buffers
+        self.val_orig_buf: List[torch.Tensor] = []
+        self.val_anon_buf: List[torch.Tensor] = []
+        self.val_max = int(min(32, int(cfg.get("eval", {}).get("max_images", 50) or 50)))
+        self.privacy_ok_thr = float(cfg.get("eval", {}).get("privacy_ok_threshold", 0.28))
+
+        # LoRA / trainable params statistics
+        try:
+            trainable = list(self.generator.trainable_parameters())
+            trainable_count = sum(int(p.numel()) for p in trainable)
+            total_count = 0
+            if getattr(self.generator, "backend", "unet") == "unet":
+                total_count = sum(int(p.numel()) for p in self.generator.parameters())
+            else:
+                net = getattr(self.generator, "net", None)
+                pipe = getattr(net, "pipe", None)
+                unet = getattr(pipe, "unet", None) if pipe is not None else None
+                if unet is not None:
+                    total_count = sum(int(p.numel()) for p in unet.parameters())
+                else:
+                    total_count = trainable_count
+            frozen = max(0, total_count - trainable_count)
+            print(f"[LoRA/Trainable] trainable={trainable_count:,} frozen={frozen:,} total~={total_count:,}")
+        except Exception as e:
+            print(f"[WARN] Failed to compute trainable/frozen params: {e}")
 
     def forward(self, images: torch.Tensor, masks: torch.Tensor, prompt: Optional[str] = None, neg: Optional[str] = None) -> torch.Tensor:
         return self.generator(images, masks, prompt=prompt or "", negative_prompt=neg)
@@ -135,6 +163,13 @@ class AnonyLightningModule(pl.LightningModule):
                 prm.get("plate", "randomized license plate characters, realistic metal plate")
             )
             neg_prompt = prm.get("neg", "low quality, artifacts, distorted, blank plate, no characters")
+            # International plate prompt enhancement
+            if has_plate:
+                style_key, style_prompt, style_neg = self._select_plate_style(batch)
+                if style_prompt:
+                    dyn_prompt = (dyn_prompt + ", " + style_prompt).strip(", ")
+                if style_neg:
+                    neg_prompt = (neg_prompt + ", " + style_neg).strip(", ")
 
             opt_gen.zero_grad(set_to_none=True)
             with torch.autocast(device_type='cuda', enabled=(torch.cuda.is_available() and self.trainer is not None and str(self.trainer.precision).startswith('16'))):
@@ -176,5 +211,123 @@ class AnonyLightningModule(pl.LightningModule):
             for k,v in g_scalars.items():
                 self.log(f"train/{k}", v, on_step=True)
 
+        # Simple checkpoint per steps
+        try:
+            ck = int(self.cfg.get("checkpoint", {}).get("save_every_steps", 0) or 0)
+            out_dir = self.cfg.get("paths", {}).get("outputs", "outputs")
+            if ck > 0 and (int(self.global_step) % ck == 0) and int(self.global_step) > 0:
+                ck_dir = os.path.join(out_dir, "lightning_ckpts")
+                os.makedirs(ck_dir, exist_ok=True)
+                torch.save({"generator": self.generator.state_dict()}, os.path.join(ck_dir, f"gen_step{int(self.global_step):06d}.pt"))
+        except Exception as e:
+            print(f"[WARN] checkpoint save failed: {e}")
+
         # return loss for logging purposes only
         return None
+
+    @torch.no_grad()
+    def validation_step(self, batch: Dict[str, Any], batch_idx: int):
+        if len(self.val_orig_buf) >= self.val_max:
+            return None
+        images = batch["images"].to(self.device)
+        masks = batch["masks"].to(self.device)
+        # Simple prompt (reuse train logic partially)
+        prm = _get_train_prompts(self.cfg)
+        has_face = any((lbl.numel() > 0 and (lbl == 1).any().item()) for lbl in batch["labels"])  # cat 1 => face
+        has_plate = any((lbl.numel() > 0 and (lbl == 2).any().item()) for lbl in batch["labels"])  # cat 2 => plate
+        dyn_prompt = _compose_dynamic_prompt(
+            prm.get("base"), has_face, has_plate,
+            prm.get("face", "realistic anonymized face"),
+            prm.get("plate", "randomized license plate characters, realistic metal plate")
+        )
+        neg_prompt = prm.get("neg", "low quality, artifacts, distorted, blank plate, no characters")
+        if has_plate:
+            style_key, style_prompt, style_neg = self._select_plate_style(batch)
+            if style_prompt:
+                dyn_prompt = (dyn_prompt + ", " + style_prompt).strip(", ")
+            if style_neg:
+                neg_prompt = (neg_prompt + ", " + style_neg).strip(", ")
+
+        anon = self.generator(images, masks, prompt=dyn_prompt, negative_prompt=neg_prompt)
+        remain = self.val_max - len(self.val_orig_buf)
+        take = min(remain, images.size(0))
+        self.val_orig_buf.append(images[:take].detach().cpu())
+        self.val_anon_buf.append(anon[:take].detach().cpu())
+
+        # Optionally save samples
+        try:
+            out_dir = self.cfg.get("paths", {}).get("outputs", "outputs")
+            e_dir = os.path.join(out_dir, "lightning_val_samples", f"epoch_{int(self.current_epoch)}")
+            os.makedirs(e_dir, exist_ok=True)
+            for i in range(take):
+                o = self._to_uint8(images[i])
+                a = self._to_uint8(anon[i])
+                Image.fromarray(o).save(os.path.join(e_dir, f"orig_{batch_idx:04d}_{i:02d}.jpg"))
+                Image.fromarray(a).save(os.path.join(e_dir, f"anon_{batch_idx:04d}_{i:02d}.jpg"))
+        except Exception:
+            pass
+        return None
+
+    def on_validation_epoch_end(self) -> None:
+        if len(self.val_orig_buf) == 0 or len(self.val_anon_buf) == 0:
+            return
+        try:
+            orig = torch.cat(self.val_orig_buf, dim=0)
+            anon = torch.cat(self.val_anon_buf, dim=0)
+            sim = arcface_similarity(orig, anon)
+            mean_sim = float(sim.mean().item()) if sim is not None else float('nan')
+            self.log("val/arcface_mean_sim", mean_sim, prog_bar=True, on_epoch=True)
+            status = "[PRIVACY_OK]" if (sim is not None and mean_sim < self.privacy_ok_thr) else "[PRIVACY_WARN]"
+            print(f"{status} epoch={int(self.current_epoch)} arcface_mean={mean_sim:.4f} thr={self.privacy_ok_thr}")
+        except Exception as e:
+            print(f"[WARN] validation metrics failed: {e}")
+        finally:
+            self.val_orig_buf.clear()
+            self.val_anon_buf.clear()
+
+    def _to_uint8(self, x: torch.Tensor) -> "np.ndarray":
+        try:
+            import numpy as np
+            y = (x.detach().cpu().clamp(-1, 1) * 0.5 + 0.5) * 255.0
+            return y.permute(1, 2, 0).numpy().astype(np.uint8)
+        except Exception:
+            return (x.detach().cpu().clamp(-1, 1) * 0.5 + 0.5).mul(255).byte().permute(1,2,0).numpy()
+
+    def _select_plate_style(self, batch: Dict[str, Any]):
+        styles = self.cfg.get("model", {}).get("generator", {}).get("diffusers", {}).get("plate_styles", {})
+        whitelist = self.cfg.get("model", {}).get("generator", {}).get("diffusers", {}).get("plate_style_whitelist", None)
+        # Default fallbacks
+        chosen = "CN"
+        prompt_hint = None
+        neg_hint = None
+        try:
+            # Compute average aspect ratio among label=2 boxes
+            ratios: List[float] = []
+            for b, lbl in zip(batch["boxes"], batch["labels"]):
+                if lbl.numel() == 0:
+                    continue
+                # select those equal to 2
+                if (lbl == 2).any().item():
+                    for bb in b[(lbl == 2).nonzero(as_tuple=False).view(-1)]:
+                        x1, y1, x2, y2 = bb.tolist()
+                        w = max(1.0, x2 - x1)
+                        h = max(1.0, y2 - y1)
+                        ratios.append(float(w / h))
+            r = sum(ratios) / len(ratios) if len(ratios) > 0 else None
+            # Simple heuristic thresholds
+            if r is not None:
+                # EU plates are very wide (e.g., ~4.7), CN ~3.1, US often ~2.0
+                if r >= 4.2 and (whitelist is None or "EU" in whitelist):
+                    chosen = "EU"
+                elif r >= 2.6 and r < 4.2 and (whitelist is None or "CN" in whitelist):
+                    chosen = "CN"
+                elif (whitelist is None or "US" in whitelist):
+                    chosen = "US"
+            # Extract hints
+            if isinstance(styles, dict) and chosen in styles:
+                st = styles[chosen]
+                prompt_hint = st.get("prompt_hint")
+                neg_hint = st.get("neg_hint")
+        except Exception:
+            pass
+        return chosen, prompt_hint, neg_hint
