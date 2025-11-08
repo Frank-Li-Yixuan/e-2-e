@@ -341,6 +341,12 @@ class GeneratorWrapper(nn.Module):
                 guidance_scale=float(dcfg.get("guidance_scale", 7.5)),
                 prompt_token_limit=int(dcfg.get("prompt_token_limit", 75)),
             )
+            # Eagerly initialize Diffusers pipeline so LoRA params are materialized
+            # before configure_optimizers collects trainable parameters.
+            try:
+                self.net._maybe_init()  # type: ignore[attr-defined]
+            except Exception:
+                pass
         else:
             raise ValueError(f"Unknown generator backend: {self.backend}")
 
