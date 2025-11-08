@@ -9,6 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.sampler import WeightedRandomSampler
 from torchvision.ops import box_convert
 from torchvision import transforms as T
+import torch.nn.functional as F
 
 try:
     from pycocotools.coco import COCO  # type: ignore
@@ -44,6 +45,9 @@ class CocoFaces(Dataset):
         pseudotargets_dir: Optional[str] = None,
         image_size: int = 512,
         normalize: bool = True,
+        auto_box_mask: bool = False,
+        box_mask_dilate: int = 0,
+        box_mask_soft_edges: int = 0,
     ) -> None:
         super().__init__()
         self.images_dir = images_dir
@@ -52,6 +56,9 @@ class CocoFaces(Dataset):
         self.pseudotargets_dir = pseudotargets_dir
         self.image_size = image_size
         self.normalize = normalize
+        self.auto_box_mask = auto_box_mask
+        self.box_mask_dilate = int(box_mask_dilate)
+        self.box_mask_soft_edges = int(box_mask_soft_edges)
 
         # populate file list: prefer COCO image list (supports subdirectories in file_name)
         self.fnames: List[str] = []
@@ -149,6 +156,39 @@ class CocoFaces(Dataset):
 
         labels = torch.tensor(targets.get("labels", []), dtype=torch.int64) if len(targets.get("labels", [])) > 0 else torch.zeros((0,), dtype=torch.int64)
 
+        # If no explicit mask provided and auto_box_mask enabled, synthesize mask from boxes
+        if self.auto_box_mask and mask_t.sum().item() == 0 and boxes.numel() > 0:
+            # boxes are in resized coordinate space already
+            H, W = mask_t.shape[1], mask_t.shape[2]
+            synth = torch.zeros((H, W), dtype=torch.float32)
+            for b in boxes:
+                x1, y1, x2, y2 = b.tolist()
+                # clamp & int conversion
+                x1i = max(0, min(W - 1, int(x1)))
+                y1i = max(0, min(H - 1, int(y1)))
+                x2i = max(0, min(W, int(x2)))
+                y2i = max(0, min(H, int(y2)))
+                synth[y1i:y2i, x1i:x2i] = 1.0
+            # Optional dilation using max-pooling like expansion
+            if self.box_mask_dilate > 0:
+                k = int(self.box_mask_dilate)
+                if k > 0:
+                    # create pooling window (approximate dilation)
+                    pad = k
+                    synth_pad = F.pad(synth.unsqueeze(0).unsqueeze(0), (pad, pad, pad, pad), value=0)
+                    # use max-pooling with stride 1 to dilate
+                    synth_d = F.max_pool2d(synth_pad, kernel_size=1 + 2 * k, stride=1)
+                    synth = synth_d.squeeze(0).squeeze(0)[:, :W][:H, :]
+                    synth = synth[:H, :W]
+            # Optional soft edges via average pooling (feathering)
+            if self.box_mask_soft_edges > 0:
+                r = int(self.box_mask_soft_edges)
+                if r > 0:
+                    # simple blur then renormalize to [0,1]
+                    synth_blur = F.avg_pool2d(synth.unsqueeze(0).unsqueeze(0), kernel_size=1 + 2 * r, stride=1, padding=r)
+                    synth = synth_blur.squeeze(0).squeeze(0).clamp(0, 1)
+            mask_t = synth.unsqueeze(0)
+
         return {
             "image": img_t,            # normalized [-1,1] if normalize=True
             "mask": mask_t,             # [1,H,W] in [0,1]
@@ -185,6 +225,9 @@ def build_dataloaders(cfg: Dict[str, Any]) -> Tuple[Optional[DataLoader], Option
     image_size = cfg.get("data", {}).get("image_size", 512)
     normalize = cfg.get("data", {}).get("normalize", True)
     sample_strategy = cfg.get("data", {}).get("sample_strategy", "none")  # none | oversample_face | oversample_plate | balanced
+    auto_box_mask = cfg.get("data", {}).get("auto_box_mask", False)
+    box_mask_dilate = cfg.get("data", {}).get("box_mask_dilate", 0)
+    box_mask_soft_edges = cfg.get("data", {}).get("box_mask_soft_edges", 0)
 
     def make_dl(split: str) -> Optional[DataLoader]:
         img_dir = paths.get(f"{split}_images")
@@ -197,6 +240,9 @@ def build_dataloaders(cfg: Dict[str, Any]) -> Tuple[Optional[DataLoader], Option
             pseudotargets_dir=paths.get("pseudotargets"),
             image_size=image_size,
             normalize=normalize,
+            auto_box_mask=auto_box_mask,
+            box_mask_dilate=box_mask_dilate,
+            box_mask_soft_edges=box_mask_soft_edges,
         )
         sampler = None
         shuffle = (split == "train")
@@ -221,15 +267,24 @@ def build_dataloaders(cfg: Dict[str, Any]) -> Tuple[Optional[DataLoader], Option
                 weights.append(w)
             sampler = WeightedRandomSampler(weights, num_samples=len(ds), replacement=True)
             shuffle = False
-        dl = DataLoader(
-            ds,
+        # DataLoader stability knobs
+        num_workers = int(cfg.get("train", {}).get("num_workers", 4))
+        persistent_workers = bool(cfg.get("train", {}).get("persistent_workers", False)) and num_workers > 0
+        prefetch_factor = int(cfg.get("train", {}).get("prefetch_factor", 2)) if num_workers > 0 else None
+
+        dl_kwargs: Dict[str, Any] = dict(
+            dataset=ds,
             batch_size=cfg.get("train", {}).get("batch_size", 2),
-            num_workers=cfg.get("train", {}).get("num_workers", 4),
+            num_workers=num_workers,
             shuffle=shuffle if sampler is None else False,
             sampler=sampler,
             pin_memory=torch.cuda.is_available(),
             collate_fn=collate_fn,
+            persistent_workers=persistent_workers,
         )
+        if prefetch_factor is not None:
+            dl_kwargs["prefetch_factor"] = max(2, prefetch_factor)
+        dl = DataLoader(**dl_kwargs)
         return dl
 
     return make_dl("train"), make_dl("val")

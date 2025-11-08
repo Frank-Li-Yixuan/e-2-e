@@ -1,6 +1,37 @@
 seed: 42
 device: auto
 precision: fp16
+repro:
+  deterministic: false  # 如需结果完全可复现改为 true（会降低速度）
+
+data:
+  image_size: 512
+  normalize: true
+  sample_strategy: balanced  # balanced | oversample_face | oversample_plate | none
+  auto_box_mask: true
+  box_mask_dilate: 6
+  box_mask_soft_edges: 2
+
+checkpoint:
+  save_every_steps: 250
+  resume: null
+
+schedule:
+  generator:
+    warmup_steps: 80
+    total_steps: 1000
+    min_lr_scale: 0.1  # 余弦最低学习率比例
+  discriminator:
+    warmup_steps: 80
+    total_steps: 1000
+    min_lr_scale: 0.1
+  detector:
+    warmup_steps: 80
+    total_steps: 1000
+    min_lr_scale: 0.2
+
+grad:
+  clip_norm: 1.0  # 全局梯度裁剪，防止判别器或生成器爆炸
 
 model:
   backbone:
@@ -71,19 +102,21 @@ model:
     spectral_norm: true
 
 loss:
-  l1_weight: 0.5
-  perceptual_weight: 0.2
-  id_suppress_weight: 0.2
-  adv_weight: 0.08  # 略降对抗强度减少不稳定
+  l1_weight: 0.4            # 略降低 L1，给感知与对抗更多空间
+  perceptual_weight: 0.25   # 提升纹理/视觉质量权重
+  id_suppress_weight: 0.25  # 稍加强身份抑制
+  adv_weight: 0.07          # 稍降，结合更高 perceptual 平衡稳定性
 
 train:
   epochs: 1
-  batch_size: 2
-  num_workers: 2
-  grad_accum_steps: 1
+  batch_size: 2            # T4/GPU内存紧张可降至1；A100可升至4
+  num_workers: 1
+  persistent_workers: false
+  prefetch_factor: 2
+  grad_accum_steps: 1      # 如果 batch_size=1，可设为2 来提升有效批次
   max_steps: 1000
   optimizer: adamw
-  lr: {detector: 1.0e-05, generator: 1.0e-04, discriminator: 1.0e-04}
+  lr: {detector: 7.0e-06, generator: 8.0e-05, discriminator: 8.0e-05}  # 轻微下调初始学习率，配合调度器
   alternating: {det_steps: 1, gen_steps: 1, disc_steps: 1}
   pretrain: {enabled: false, steps: 0}
 

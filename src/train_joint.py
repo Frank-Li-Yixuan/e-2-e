@@ -182,7 +182,12 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
     opt_gen = optim.AdamW(generator.trainable_parameters(), lr=float(cfg["train"]["lr"]["generator"])) if list(generator.trainable_parameters()) else None
     opt_disc = optim.AdamW(disc.parameters(), lr=float(cfg["train"]["lr"]["discriminator"])) if disc is not None else None
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(cfg.get("precision", "fp32") != "fp32" and torch.cuda.is_available()))
+    # Prefer new torch.amp.GradScaler API; fallback to cuda.amp for older torch
+    try:
+        from torch.amp import GradScaler as _AmpGradScaler  # type: ignore
+        scaler = _AmpGradScaler(device="cuda", enabled=(cfg.get("precision", "fp32") != "fp32" and torch.cuda.is_available()))
+    except Exception:
+        scaler = torch.cuda.amp.GradScaler(enabled=(cfg.get("precision", "fp32") != "fp32" and torch.cuda.is_available()))
 
     lcfg = cfg.get("loss", {})
 
@@ -314,8 +319,20 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
             w = csv.writer(f)
             w.writerow(["step", "epoch", "loss_gen", "loss_det", "arcface_mean_sim", "easyocr_plate_acc", "fid", "val_map"]) 
     for ep in range(epochs):
-        pbar = tqdm(train_loader, desc=f"epoch {ep+1}/{epochs}")
-        for batch in pbar:
+        num_batches = len(train_loader)
+        pbar = tqdm(total=num_batches, desc=f"epoch {ep+1}/{epochs}")
+        loader_it = iter(train_loader)
+        b_idx = 0
+        while b_idx < num_batches:
+            try:
+                batch = next(loader_it)
+            except StopIteration:
+                break
+            except Exception as e:
+                print(f"[WARN] DataLoader batch #{b_idx} skipped: {e}")
+                b_idx += 1
+                pbar.update(1)
+                continue
             # ensure shapes
             images = batch["images"].to(device)
             masks = batch["masks"].to(device)
@@ -531,7 +548,11 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
                 pass
             # early cap
             if max_steps is not None and global_step >= int(max_steps):
+                b_idx += 1
+                pbar.update(1)
                 break
+            b_idx += 1
+            pbar.update(1)
         if max_steps is not None and global_step >= int(max_steps):
             break
 
