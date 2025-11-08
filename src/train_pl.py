@@ -19,6 +19,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--paths-overlay", type=str, default=None)
+    # Allow overriding max_steps from CLI (supports both --max_steps and --max-steps)
+    parser.add_argument("--max_steps", "--max-steps", type=int, default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -33,6 +35,12 @@ def main():
                 print(f"[INFO] Applied paths overlay from {args.paths_overlay}")
         except Exception as e:
             print(f"[WARN] Failed to apply paths overlay: {e}")
+
+    # Override max_steps if provided via CLI
+    if args.max_steps is not None:
+        cfg.setdefault("train", {})
+        cfg["train"]["max_steps"] = int(args.max_steps)
+        print(f"[INFO] Overriding train.max_steps to {int(args.max_steps)} via CLI")
 
     # Reproducibility (optional deterministic)
     try:
