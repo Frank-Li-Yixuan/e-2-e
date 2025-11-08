@@ -56,6 +56,31 @@ def save_checkpoint(state: Dict[str, Any], path: str) -> None:
     torch.save(state, path)
 
 
+def _get_train_prompts(cfg: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    gcfg = cfg.get("model", {}).get("generator", {})
+    base = gcfg.get("train_prompt", None)
+    neg = gcfg.get("negative_prompt", None)
+    # 允许单独覆盖类别提示
+    face = gcfg.get("train_prompt_face", None)
+    plate = gcfg.get("train_prompt_plate", None)
+    return {"base": base, "neg": neg, "face": face, "plate": plate}
+
+
+def _compose_dynamic_prompt(base: Optional[str], has_face: bool, has_plate: bool,
+                            face_prompt: Optional[str], plate_prompt: Optional[str]) -> str:
+    parts = []
+    if base:
+        parts.append(base)
+    # 根据批次包含的标签动态追加
+    if has_face and face_prompt:
+        parts.append(face_prompt)
+    if has_plate and plate_prompt:
+        parts.append(plate_prompt)
+    # 限制长度，避免过长提示
+    text = ", ".join([p.strip() for p in parts if p and p.strip()])
+    return text[:512]
+
+
 def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[int] = None) -> None:
     # Reproducibility controls
     try:
@@ -303,10 +328,23 @@ def train(cfg: Dict[str, Any], mode: str = "auto", max_steps_override: Optional[
             loss_gen_val = None
             if gen_steps > 0 and opt_gen is not None:
                 generator.train()
+                # 准备动态 prompt（仅对 diffusers backend 生效；unet 忽略）
+                prm = _get_train_prompts(cfg)
+                # 检查当前 batch 是否包含 face(1)/plate(2)
+                has_face = any((b.numel() > 0) and (1 in b[:, 0:0].new_full((1,), 1)) for b in batch["labels"]) if False else any(
+                    (lbl.numel() > 0 and (lbl == 1).any().item()) for lbl in batch["labels"]
+                )
+                has_plate = any((lbl.numel() > 0 and (lbl == 2).any().item()) for lbl in batch["labels"])
+                dyn_prompt = _compose_dynamic_prompt(
+                    prm.get("base"), has_face, has_plate,
+                    prm.get("face", "realistic anonymized face"),
+                    prm.get("plate", "randomized license plate characters, realistic metal plate")
+                )
+                neg_prompt = prm.get("neg", "low quality, artifacts, distorted, blank plate, no characters")
                 for _ in range(gen_steps):
                     opt_gen.zero_grad(set_to_none=True)
                     with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
-                        fake = generator(images, masks)
+                        fake = generator(images, masks, prompt=dyn_prompt, negative_prompt=neg_prompt)
                         # supervised losses (if pseudo present)
                         l1 = torch.tensor(0.0, device=device)
                         perc = torch.tensor(0.0, device=device)

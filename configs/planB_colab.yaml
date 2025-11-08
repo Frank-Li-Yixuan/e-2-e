@@ -63,6 +63,11 @@ model:
     finetune:
       use_lora: true
       learnable_layers: ['unet.mid_block', 'unet.up_blocks[-1]', 'unet.down_blocks[0].attentions[0]']
+    # 训练阶段的基础与类别提示
+    train_prompt: "realistic anonymized appearance, consistent background lighting, natural materials"
+    train_prompt_face: "realistic anonymized face with natural skin texture"
+    train_prompt_plate: "randomized license plate characters, embossed alphanumerics on reflective metal plate"
+    negative_prompt: "low quality, artifacts, distorted, blank plate, no characters"
   discriminator:
     enabled: true
     base_channels: 64
