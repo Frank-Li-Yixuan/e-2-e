@@ -4,7 +4,7 @@ Colab path auto-set helper.
 Creates a small YAML overlay (configs/paths_overlay.yaml) filling paths.train_images/annotations etc.
 Logic:
   1. Detect mounted Drive root (default /content/drive/MyDrive) or use $DRIVE_ROOT override.
-  2. Prefer unified COCO if present under data/unified/ ; else attempt WiderFace + (optional) PP4AV merge.
+    2. Prefer unified COCO if present under data/unified/ ; else attempt WiderFace + (optional) PP4AV/CCPD merge.
   3. If both WiderFace and PP4AV individual COCO JSON exist, can optionally merge into a temporary unified JSON.
 
 Usage (Colab cell):
@@ -22,6 +22,7 @@ For now this script just writes the overlay; you can manually merge or implement
 """
 import os, sys, json, argparse, yaml, hashlib, glob
 from pathlib import Path
+from typing import Optional
 
 CANDIDATES = [
     ("unified_train", "data/unified/unified_train.json"),
@@ -29,6 +30,7 @@ CANDIDATES = [
     ("widerface_train", "data/widerface_train_coco.json"),
     ("widerface_val", "data/widerface_val_coco.json"),
     ("pp4av", "data/pp4av_coco.json"),
+    ("ccpd", "data/ccpd_coco.json"),
 ]
 
 MERGE_OUTPUT_TRAIN = "data/unified/_auto_merged_train.json"
@@ -178,6 +180,9 @@ def main():
     drive_pp4av = find_drive_file([
         'PP4AV/pp4av_coco.json', 'pp4av_coco.json', 'data/pp4av_coco.json'
     ])
+    drive_ccpd = find_drive_file([
+        'CCPD2020/ccpd_coco.json', 'ccpd_coco.json', 'data/ccpd_coco.json'
+    ])
 
     use_train_ann = None
     use_val_ann = None
@@ -190,23 +195,45 @@ def main():
     elif args.mode in ['auto','unified-only'] and drive_unified_train and drive_unified_val:
         use_train_ann = drive_unified_train
         use_val_ann = drive_unified_val
-    # 3) Else try merge (repo-local or Drive)
+    # 3) Else try merge (repo-local or Drive): WiderFace (faces) + PP4AV/CCPD (plates)
     elif args.mode in ['auto','merge'] and (
-        (wider_train.exists() and pp4av.exists()) or (drive_wider_train and drive_pp4av)
+        wider_train.exists() or drive_wider_train or wider_val.exists() or drive_wider_val
+    ) and (
+        pp4av.exists() or drive_pp4av or (data_dir / 'ccpd_coco.json').exists() or drive_ccpd
     ):
         try:
-            face_src = wider_train if wider_train.exists() else drive_wider_train
-            plate_src = pp4av if pp4av.exists() else drive_pp4av
+            face_src = wider_train if wider_train.exists() else (drive_wider_train or wider_train)
+            plate_src_pp4av = pp4av if pp4av.exists() else drive_pp4av
+            plate_src_ccpd = (data_dir / 'ccpd_coco.json') if (data_dir / 'ccpd_coco.json').exists() else drive_ccpd
             face_coco = load_json(face_src)
-            plate_coco = load_json(plate_src)
             normalize_filenames(face_coco)
-            normalize_filenames(plate_coco)
-            merged_train = merge_faces_plates(face_coco, plate_coco, train=True)
+            merged_train = None
+            # sequentially merge multiple plate sources if present
+            if plate_src_pp4av is not None:
+                plate_coco = load_json(plate_src_pp4av)
+                normalize_filenames(plate_coco)
+                merged_train = merge_faces_plates(face_coco, plate_coco, train=True)
+            if plate_src_ccpd is not None:
+                ccpd_coco = load_json(plate_src_ccpd)
+                normalize_filenames(ccpd_coco)
+                merged_train = merge_faces_plates(merged_train if merged_train is not None else face_coco, ccpd_coco, train=True)
+            if merged_train is None:
+                raise RuntimeError('No plate dataset found for merge')
             # For val: fallback to wider_val only if no plate val; else reuse some subset
             val_src_path = wider_val if wider_val.exists() else (drive_wider_val or face_src)
             val_src = load_json(val_src_path) if isinstance(val_src_path, (str, Path)) else face_coco
             normalize_filenames(val_src)
-            merged_val = merge_faces_plates(val_src, plate_coco, train=False)
+            merged_val = None
+            if plate_src_pp4av is not None:
+                plate_coco = load_json(plate_src_pp4av)
+                normalize_filenames(plate_coco)
+                merged_val = merge_faces_plates(val_src, plate_coco, train=False)
+            if plate_src_ccpd is not None:
+                ccpd_coco = load_json(plate_src_ccpd)
+                normalize_filenames(ccpd_coco)
+                merged_val = merge_faces_plates(merged_val if merged_val is not None else val_src, ccpd_coco, train=False)
+            if merged_val is None:
+                merged_val = val_src
             out_train = data_dir / 'unified' / '_auto_merged_train.json'
             out_val = data_dir / 'unified' / '_auto_merged_val.json'
             out_train.parent.mkdir(parents=True, exist_ok=True)
@@ -216,16 +243,26 @@ def main():
             use_val_ann = out_val
             print('[INFO] merged unified train/val written:', out_train, out_val)
         except Exception as e:
-            print('[WARN] merge failed, falling back to wider only:', e)
-            if wider_train.exists() or drive_wider_train:
+            print('[WARN] merge failed, trying plate-only or face-only fallback:', e)
+            # Prefer plate-only (PP4AV or CCPD) if face not available
+            if (pp4av.exists() or drive_pp4av) or ((data_dir / 'ccpd_coco.json').exists() or drive_ccpd):
+                use_train_ann = (pp4av if pp4av.exists() else (drive_pp4av or (data_dir / 'ccpd_coco.json') or drive_ccpd))
+                use_val_ann = use_train_ann
+            elif wider_train.exists() or drive_wider_train:
                 use_train_ann = wider_train if wider_train.exists() else drive_wider_train
-            if wider_val.exists() or drive_wider_val:
-                use_val_ann = wider_val if wider_val.exists() else drive_wider_val
+                use_val_ann = wider_val if wider_val.exists() else (drive_wider_val or use_train_ann)
     else:
+        # Simple fallbacks without merge: prefer unified; else prefer face; else plate
         if wider_train.exists() or drive_wider_train:
             use_train_ann = wider_train if wider_train.exists() else drive_wider_train
+        elif pp4av.exists() or drive_pp4av:
+            use_train_ann = pp4av if pp4av.exists() else drive_pp4av
+        elif (data_dir / 'ccpd_coco.json').exists() or drive_ccpd:
+            use_train_ann = (data_dir / 'ccpd_coco.json') if (data_dir / 'ccpd_coco.json').exists() else drive_ccpd
         if wider_val.exists() or drive_wider_val:
             use_val_ann = wider_val if wider_val.exists() else drive_wider_val
+        else:
+            use_val_ann = use_train_ann
 
     if use_train_ann is None or use_val_ann is None:
         print('[ERROR] Could not determine annotations. Please upload unified or widerface COCO JSONs.')
