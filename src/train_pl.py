@@ -66,12 +66,14 @@ def main():
     val_check_interval = eval_cfg.get("val_check_interval", None)
     limit_val_batches = int(eval_cfg.get("limit_val_batches", 0) or 0)
 
+    # Manual optimization is used in AnonyLightningModule, so we must NOT pass gradient_clip_val to Trainer.
+    # Gradient clipping is performed inside training_step manually.
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "auto",
         devices=1,
         precision=precision,
         max_steps=max_steps,
-        gradient_clip_val=grad_clip if grad_clip > 0 else None,
+        # gradient_clip_val removed due to manual optimization
         accumulate_grad_batches=accum,
         log_every_n_steps=50,
         enable_checkpointing=False,
