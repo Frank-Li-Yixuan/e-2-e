@@ -20,6 +20,29 @@ model:
       mask_dilate: 4
       enable_xformers: true
       prompt_token_limit: 68
+      # 国际车牌风格支持
+      plate_intl_aspect: 4.73     # EU 520x110mm
+      plate_intl_eu_band: true    # 左侧蓝色EU标识条
+      plate_intl_border_ratio: 0.06
+      # 可选样式库：CN、EU、US（可按需扩展）
+      plate_styles:
+        CN:
+          pattern: 'L DDDDDD'     # 用于占位，实际 CN 走专用生成
+          prompt_hint: 'Chinese license plate reflective blue or green background with embossed characters'
+          neg_hint: 'no plain rectangle, no blank'
+          aspect: 3.14
+        EU:
+          pattern: 'LLL DDDD'     # 如 ABC 1234
+          prompt_hint: 'European Union style license plate, white reflective background, black FE-style characters, metal plate, bolts'
+          neg_hint: 'no blank, no sticker, no color banding except EU blue'
+          aspect: 4.73
+        US:
+          pattern: 'LDDD LLL'     # 如 B123 XYZ
+          prompt_hint: 'US style license plate, embossed alphanumerics, realistic reflective background, bolts'
+          neg_hint: 'no blank, no toy plate'
+          aspect: 2.00
+      # 如需仅启用某些样式：
+      # plate_style_whitelist: ['EU']
       # 车牌相关高质量推理参数（可选）
       plate_steps: 34
       plate_guidance: 8.0
@@ -64,6 +87,14 @@ train:
 
 paths:
   outputs: /content/outputs/planB
+  # 必填：根据你的 Colab 数据位置填写（示例）
+  # train_images: /content/data/train/images
+  # train_annotations: /content/data/train/annotations.json
+  # val_images: /content/data/val/images
+  # val_annotations: /content/data/val/annotations.json
+  # train_masks: /content/data/train/masks   # 可选
+  # val_masks: /content/data/val/masks       # 可选
+  # pseudotargets: /content/data/pseudotargets  # 可选（若有）
 
 eval:
   run_on_val_every_steps: 200

@@ -48,6 +48,10 @@ def _get_diffusers_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
         'plate_seed_shuffle': bool(dcfg.get('plate_seed_shuffle', True)),
         'plate_styles': dcfg.get('plate_styles', {}),
         'plate_style_whitelist': dcfg.get('plate_style_whitelist', None),
+    # international plate aspect (e.g., EU 520x110mm ≈ 4.73)
+    'plate_intl_aspect': float(dcfg.get('plate_intl_aspect', 4.73)),
+    'plate_intl_eu_band': bool(dcfg.get('plate_intl_eu_band', True)),
+    'plate_intl_border_ratio': float(dcfg.get('plate_intl_border_ratio', 0.06)),
         # geometry heuristic
         'plate_geom_min_chars': int(dcfg.get('plate_geom_min_chars', 4)),
         'plate_geom_max_chars': int(dcfg.get('plate_geom_max_chars', 9)),
@@ -172,9 +176,12 @@ def _load_font(size: int, pref: str = 'latin') -> ImageFont.FreeTypeFont:
         ]
     else:
         candidates = [
+            r"C:\\Windows\\Fonts\\bahnschrift.ttf",
             r"C:\\Windows\\Fonts\\arialbd.ttf",
             r"C:\\Windows\\Fonts\\arial.ttf",
             r"C:\\Windows\\Fonts\\consola.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         ]
     for p in candidates:
         try:
@@ -186,6 +193,100 @@ def _load_font(size: int, pref: str = 'latin') -> ImageFont.FreeTypeFont:
         return ImageFont.truetype("arial.ttf", size)
     except Exception:
         return ImageFont.load_default()
+
+
+def _render_intl_plate_anchor(base_roi: torch.Tensor, plate_xyxy: List[int], text_all: str,
+                              font_ratio: float, margin_ratio: float,
+                              aspect_target: float = 4.73, aspect_correct_strength: float = 0.5,
+                              feather_px: int = 2, perspective_deg: float = 0.0,
+                              eu_band: bool = True, border_ratio: float = 0.06) -> torch.Tensor:
+    """Render international (e.g., EU/US/JP) plate with white reflective base and black text.
+    base_roi: [B,3,H,W] in [-1,1]; plate_xyxy in ROI coords.
+    """
+    b, c, h, w = base_roi.shape
+    out = base_roi.clone()
+    font_size = max(10, int((plate_xyxy[3] - plate_xyxy[1]) * font_ratio))
+    font_lat = _load_font(font_size, pref='latin')
+    for i in range(b):
+        img = ((out[i].permute(1, 2, 0).clamp(-1, 1) * 0.5 + 0.5).cpu().numpy() * 255).astype(np.uint8)
+        pil = Image.fromarray(img)
+        x1, y1, x2, y2 = [int(v) for v in plate_xyxy]
+        plate_w = max(1, x2 - x1)
+        plate_h = max(1, y2 - y1)
+        # aspect normalization
+        cur_aspect = plate_w / max(1.0, float(plate_h))
+        if abs(cur_aspect - aspect_target) > 0.05:
+            soft_target = cur_aspect + (aspect_target - cur_aspect) * max(0.0, min(1.0, aspect_correct_strength))
+            if soft_target > cur_aspect:
+                new_h = int(round(plate_w / soft_target))
+                new_h = min(new_h, plate_h)
+                cy = (y1 + y2) // 2
+                y1 = max(0, cy - new_h // 2)
+                y2 = y1 + new_h
+            else:
+                new_w = int(round(plate_h * soft_target))
+                new_w = min(new_w, plate_w)
+                cx = (x1 + x2) // 2
+                x1 = max(0, cx - new_w // 2)
+                x2 = x1 + new_w
+            plate_w = max(1, x2 - x1)
+            plate_h = max(1, y2 - y1)
+        # base reflective white with slight gradient
+        base_color = np.array([235, 236, 232], dtype=np.float32)
+        grad = np.zeros((plate_h, plate_w, 3), dtype=np.float32)
+        for yy in range(plate_h):
+            trow = yy / max(1, plate_h - 1)
+            light = 0.12 * math.sin(trow * math.pi) + 0.9
+            grad[yy, :, :] = np.clip(base_color * light, 0, 255)
+        grad = np.clip(grad + (np.random.randn(*grad.shape) * 2.0), 0, 255).astype(np.uint8)
+        plate_pil = Image.fromarray(grad)
+        draw = ImageDraw.Draw(plate_pil)
+        # border
+        bw = max(1, int(border_ratio * plate_h))
+        draw.rectangle([0, 0, plate_w - 1, plate_h - 1], outline=(45, 45, 45), width=bw)
+        # optional EU blue band
+        if eu_band:
+            band_w = max(2, int(0.08 * plate_w))
+            draw.rectangle([0, 0, band_w, plate_h - 1], fill=(18, 51, 140))
+        # text
+        margin_x = int(plate_w * margin_ratio)
+        tx = margin_x + (band_w if eu_band else 0) + int(0.02 * plate_w)
+        ty = max(0, (plate_h - font_lat.size) // 2)
+        # scale text to available width
+        avail_w = plate_w - tx - margin_x
+        tl = draw.textlength(text_all, font=font_lat)
+        if tl > avail_w and tl > 0:
+            scale = max(0.7, avail_w / tl)
+            font_lat = _load_font(max(8, int(font_lat.size * scale)), pref='latin')
+        # slight shadow to enhance
+        shadow = 1
+        draw.text((tx + shadow, ty + shadow), text_all, font=font_lat, fill=(30, 30, 30))
+        draw.text((tx, ty), text_all, font=font_lat, fill=(8, 8, 8))
+        # feathered paste
+        mask = Image.new('L', (plate_w, plate_h), 0)
+        mdraw = ImageDraw.Draw(mask)
+        try:
+            mdraw.rounded_rectangle([0, 0, plate_w - 1, plate_h - 1], radius=max(2, int(0.08 * plate_h)), fill=255)
+        except Exception:
+            mdraw.rectangle([0, 0, plate_w - 1, plate_h - 1], fill=255)
+        if feather_px and feather_px > 0:
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_px))
+        if perspective_deg and perspective_deg > 0.0:
+            import random as _r, math as _m
+            deg = (_r.random() * 2 - 1) * perspective_deg
+            dx = int(_m.tan(_m.radians(deg)) * plate_h * 0.25)
+            src = np.float32([[0, 0], [plate_w - 1, 0], [plate_w - 1, plate_h - 1], [0, plate_h - 1]])
+            dst = np.float32([[max(0, 0 + dx), 0], [min(plate_w - 1, plate_w - 1 - dx), 0],
+                              [plate_w - 1, plate_h - 1], [0, plate_h - 1]])
+            M = cv2.getPerspectiveTransform(src, dst)
+            plate_np = np.array(plate_pil)[:, :, ::-1]
+            warped = cv2.warpPerspective(plate_np, M, (plate_w, plate_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            plate_pil = Image.fromarray(warped[:, :, ::-1])
+        pil.paste(plate_pil, (x1, y1), mask)
+        out_np = np.array(pil).astype(np.float32) / 255.0
+        out_t = torch.from_numpy(out_np).permute(2, 0, 1)
+        out[i] = out_t * 2 - 1
+    return out
 
 
 def _render_cn_plate_anchor(base_roi: torch.Tensor, plate_xyxy: List[int], text_all: str, plate_type: str,
@@ -709,14 +810,50 @@ def run_infer(cfg: Dict[str, Any], images_dir: str, out_dir: str, max_images: in
                         # 检测原始 ROI 颜色类型（绿色新能源或蓝色普通）用于背景渲染
                         roi_rgb_for_color = ((roi_img_up[0].permute(1,2,0).clamp(-1,1)*0.5+0.5).cpu().numpy()*255).astype(np.uint8)
                         plate_type = _detect_cn_plate_type(roi_rgb_for_color, [0,0,roi_rgb_for_color.shape[1], roi_rgb_for_color.shape[0]]) if is_cn_style else 'blue'
+                        # 将原图坐标的车牌框映射到当前 out_roi 尺寸
+                        sy = out_roi.shape[-2] / float(rhp)
+                        sx = out_roi.shape[-1] / float(rwp)
+                        px1 = int(max(0, (x1 - rx1) * sx))
+                        py1 = int(max(0, (y1 - ry1) * sy))
+                        px2 = int(min(out_roi.shape[-1], (x2 - rx1) * sx))
+                        py2 = int(min(out_roi.shape[-2], (y2 - ry1) * sy))
+                        plate_xyxy = [px1, py1, px2, py2]
                         if is_cn_style:
                             # 生成符合 CN 结构的文本（新能源概率 30%）并根据配置是否保留省份汉字
                             import random
                             anchor_text = _random_cn_plate_text(nev=(plate_type=='green'))
                             if not dcfg.get('plate_cn_use_province', True):
                                 anchor_text = anchor_text[1:].replace('·', ' ')
+                            anchor_canvas_stage1 = _render_cn_plate_anchor(
+                                out_roi,
+                                plate_xyxy,
+                                anchor_text,
+                                plate_type=plate_type,
+                                font_ratio=font_ratio,
+                                margin_ratio=margin_ratio_cfg,
+                                aspect_targets=(float(dcfg['plate_aspect_blue']), float(dcfg['plate_aspect_green'])),
+                                aspect_correct_strength=float(dcfg['plate_aspect_correct_strength']),
+                                feather_px=int(dcfg.get('plate_feather_px', 2)),
+                                perspective_deg=float(dcfg.get('plate_perspective_jitter_deg', 0.0)),
+                                use_province=bool(dcfg.get('plate_cn_use_province', True)),
+                            )
                         else:
+                            # 国际风格：使用样式指定的纵横比与欧盟蓝边等
                             anchor_text = plate_text.replace('-', '').replace('·','').replace(' ','')
+                            style_aspect = float(style.get('aspect', dcfg['plate_intl_aspect']))
+                            anchor_canvas_stage1 = _render_intl_plate_anchor(
+                                out_roi,
+                                plate_xyxy,
+                                anchor_text,
+                                font_ratio=font_ratio,
+                                margin_ratio=margin_ratio_cfg,
+                                aspect_target=style_aspect,
+                                aspect_correct_strength=float(dcfg['plate_aspect_correct_strength']),
+                                feather_px=int(dcfg.get('plate_feather_px', 2)),
+                                perspective_deg=float(dcfg.get('plate_perspective_jitter_deg', 0.0)),
+                                eu_band=bool(dcfg.get('plate_intl_eu_band', True)),
+                                border_ratio=float(dcfg.get('plate_intl_border_ratio', 0.06)),
+                            )
                         # 动态字体比例回路
                         font_ratio = float(dcfg['plate_text_font_ratio'])
                         margin_ratio_cfg = float(dcfg['plate_text_margin_ratio'])
