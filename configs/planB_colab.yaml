@@ -7,13 +7,13 @@ repro:
 data:
   image_size: 512
   normalize: true
-  sample_strategy: balanced  # balanced | oversample_face | oversample_plate | none
-  auto_box_mask: true
+  batch_size: 4            # A100 建议 4，如遇 OOM 可降至 2
+  num_workers: 2
   box_mask_dilate: 6
   box_mask_soft_edges: 2
 
-checkpoint:
-  save_every_steps: 250
+  max_steps: 3000
+  save_every_steps: 500
   resume: null
 
 schedule:
@@ -141,6 +141,9 @@ paths:
   # val_annotations: /content/drive/MyDrive/datasets/WiderFace/widerface_val_coco.json
 
 eval:
-  run_on_val_every_steps: 200
-  max_images: 50
+  run_on_val_every_steps: 500
+  max_images: 32
+  privacy_ok_threshold: 0.28
+  val_check_interval: 500   # Lightning: 每 500 个训练 batch 触发一次验证
+  limit_val_batches: 32     # Lightning: 验证最多跑 32 个 batch（加快验证）
   metrics: {arcface: true, easyocr: true, fid: true, map: true}

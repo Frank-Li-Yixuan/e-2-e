@@ -61,6 +61,11 @@ def main():
     grad_clip = float(cfg.get("grad", {}).get("clip_norm", 0.0) or 0.0)
     accum = int(cfg.get("train", {}).get("grad_accum_steps", 1) or 1)
 
+    # Eval cadence controls (optional, with safe defaults)
+    eval_cfg = cfg.get("eval", {})
+    val_check_interval = eval_cfg.get("val_check_interval", None)
+    limit_val_batches = int(eval_cfg.get("limit_val_batches", 0) or 0)
+
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "auto",
         devices=1,
@@ -71,6 +76,8 @@ def main():
         log_every_n_steps=50,
         enable_checkpointing=False,
         enable_progress_bar=True,
+        val_check_interval=val_check_interval,
+        limit_val_batches=limit_val_batches if limit_val_batches > 0 else None,
     )
 
     trainer.fit(model, datamodule=dm)
