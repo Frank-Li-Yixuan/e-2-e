@@ -25,6 +25,7 @@ tqdm
 # Metrics / eval
 pytorch-fid
 lpips
+lightning>=2.3.0
 
 # OCR & ID suppression
 easyocr
