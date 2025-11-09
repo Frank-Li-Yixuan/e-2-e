@@ -137,7 +137,68 @@ class DiffusersInpaintBackend(nn.Module):
                 learnable_cfg = self.finetune_cfg.get("learnable_layers", ["unet.up_blocks[-1]"])
                 patterns = _normalize_patterns(learnable_cfg)
 
-                # Preferred modern path: LoRAConfig + add_attn_procs
+                # Preferred modern path A: PEFT + pipeline-level adapters
+                try:
+                    from peft import LoraConfig as PeftLoraConfig  # type: ignore
+                    adapter_name = str(self.finetune_cfg.get("adapter_name", "anon"))
+                    peft_cfg = PeftLoraConfig(
+                        r=lora_rank,
+                        lora_alpha=lora_rank,
+                        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+                        bias="none",
+                    )
+                    # Freeze base UNet before injecting
+                    for p in self.pipe.unet.parameters():
+                        p.requires_grad_(False)
+                    added = False
+                    # Try pipeline-level first (diffusers>=0.31)
+                    try:
+                        add_ppl = getattr(self.pipe, "add_lora_adapters", None)
+                        if callable(add_ppl):
+                            add_ppl(adapter_name, peft_cfg)
+                            added = True
+                            # Activate this adapter (if API exists)
+                            try:
+                                set_adapters = getattr(self.pipe, "set_adapters", None)
+                                if callable(set_adapters):
+                                    set_adapters([adapter_name])
+                            except Exception:
+                                pass
+                    except Exception as e_add:
+                        added = False
+                        last_err = e_add
+                    # Fallback to UNet-level add_adapter if pipeline-level unavailable
+                    if not added:
+                        try:
+                            add_unet = getattr(self.pipe.unet, "add_adapter", None)
+                            if callable(add_unet):
+                                add_unet(peft_cfg)
+                                added = True
+                        except Exception as e_add2:
+                            added = False
+                            last_err = e_add2
+                    if not added:
+                        raise RuntimeError(f"Failed to add PEFT LoRA adapters ({last_err})")
+
+                    # Enable grads only for LoRA params in selected blocks
+                    params: List[torch.nn.Parameter] = []
+                    for n, p in self.pipe.unet.named_parameters():
+                        is_lora = ("lora_" in n) or (".lora" in n) or ("lora_A" in n) or ("lora_B" in n)
+                        if not is_lora:
+                            p.requires_grad_(False)
+                            continue
+                        if patterns and not any(pat in n for pat in patterns):
+                            p.requires_grad_(False)
+                        else:
+                            p.requires_grad_(True)
+                            params.append(p)
+                    self._trainable_params = params
+                    print(f"[LoRA/PEFT] adapter={adapter_name} rank={lora_rank} selected_params={len(params)}")
+                    return  # PEFT path succeeded; skip older paths
+                except Exception as e_peft:
+                    print(f"[LoRA] PEFT adapters path failed: {e_peft}")
+
+                # Preferred modern path B: Diffusers LoRAConfig + add_attn_procs (no-PEFT)
                 try:
                     from diffusers.models.lora import LoRAConfig  # type: ignore
                     unet = self.pipe.unet
