@@ -4,13 +4,14 @@ torchvision
 torchaudio
 
 # Transformers / detection
-transformers>=4.41.0
+transformers==4.57.1
 accelerate>=0.33.0
 timm>=0.9.0
 safetensors>=0.4.2
 
 # Diffusion inpainting
-diffusers>=0.27.0
+diffusers==0.29.2
+huggingface_hub==0.36.0
 xformers; platform_system == "Linux"
 
 # Vision / utils
@@ -21,6 +22,8 @@ scikit-image
 matplotlib
 pyyaml
 tqdm
+lightning>=2.3.0
+jedi>=0.16
 
 # Metrics / eval
 pytorch-fid

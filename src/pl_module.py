@@ -83,6 +83,11 @@ class AnonyLightningModule(pl.LightningModule):
         train_cfg = self.cfg.get("train", {})
         lr = train_cfg.get("lr", {"detector": 1e-5, "generator": 1e-4, "discriminator": 1e-4})
         opt_det = torch.optim.AdamW(list(self.detector.parameters()), lr=float(lr.get("detector", 1e-5))) if len(list(self.detector.parameters()))>0 else None
+        # Ensure generator lazy init (diffusers LoRA) before collecting params
+        try:
+            self.generator.ensure_initialized()  # type: ignore[attr-defined]
+        except Exception:
+            pass
         gen_params = list(self.generator.trainable_parameters())
         opt_gen = torch.optim.AdamW(gen_params, lr=float(lr.get("generator", 1e-4))) if len(gen_params)>0 else None
         opt_disc = torch.optim.AdamW(self.disc.parameters(), lr=float(lr.get("discriminator", 1e-4))) if self.disc is not None else None
@@ -215,7 +220,15 @@ class AnonyLightningModule(pl.LightningModule):
                         torch.nn.utils.clip_grad_norm_(self.disc.parameters(), max_norm=clip_val)
                     except Exception:
                         pass
-            opt_gen.step()
+            # Guard AMP scaler assertion: only step if we actually have gradients for generator params
+            try:
+                has_grad = any(p.grad is not None and torch.any(p.grad.detach() != 0) for p in self.generator.trainable_parameters())
+            except Exception:
+                has_grad = True  # if check fails, assume grads present
+            if has_grad:
+                opt_gen.step()
+            else:
+                print("[WARN] Skipped generator optimizer step due to empty/None grads (avoid AMP scaler assertion).")
             self.log("train/l1", float(l1.detach().cpu()), prog_bar=True, on_step=True)
             self.log("train/perc", float(perc.detach().cpu()), prog_bar=False, on_step=True)
             for k,v in g_scalars.items():
