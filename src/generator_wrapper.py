@@ -105,7 +105,11 @@ class DiffusersInpaintBackend(nn.Module):
         self._trainable_params = []
         if self.finetune_cfg.get("use_lora", False):
             try:
-                # Freeze everything by default (we'll only train LoRA)
+                import diffusers as _df
+                from diffusers import AttnProcessor2_0  # type: ignore
+                print(f"[LoRA/Debug] diffusers.__version__={getattr(_df, '__version__', 'unknown')}")
+
+                # Freeze base UNet and text encoder (we only train adapters)
                 self.pipe.unet.requires_grad_(False)
                 if hasattr(self.pipe, "text_encoder"):
                     try:
@@ -113,161 +117,69 @@ class DiffusersInpaintBackend(nn.Module):
                     except Exception:
                         pass
 
-                # Build per-attention processor LoRA modules
-                from diffusers.models.attention_processor import LoRAAttnProcessor  # type: ignore
-                # Optional newer variant used with SDPA in some versions
-                try:
-                    from diffusers.models.attention_processor import LoRAAttnProcessor2  # type: ignore
-                except Exception:
-                    LoRAAttnProcessor2 = None  # type: ignore
-                # AttnProcsLayers may not exist in some diffusers versions; fallback to manual param collection.
-                try:
-                    from diffusers.training_utils import AttnProcsLayers  # type: ignore
-                except Exception:
-                    AttnProcsLayers = None  # type: ignore
-
-                r = int(self.finetune_cfg.get("lora_rank", 8))
-                learnable: List[str] = list(self.finetune_cfg.get("learnable_layers", []))
-
-                # Helper: create LoRA processor robustly across diffusers versions (different ctor signatures)
-                def _make_lora_proc(h_size: int, ca_dim: Optional[int], rank: int):
-                    """Try multiple constructor patterns for LoRAAttnProcessor to handle API drift.
-
-                    Older / newer diffusers versions have accepted:
-                      LoRAAttnProcessor(hidden_size=..., cross_attention_dim=..., rank=...)
-                      LoRAAttnProcessor(hidden_size=..., cross_attention_dim=..., rank=...)
-                      LoRAAttnProcessor(hidden_size, cross_attention_dim, rank=...)
-                      LoRAAttnProcessor(hidden_size, cross_attention_dim)
-                      LoRAAttnProcessor(cross_attention_dim=..., rank=...)
-                    We brute-force small permutations until one works.
-                    """
-                    last_err = None
-                    def _try_make(cls):
-                        # Try canonical kwargs
-                        try:
-                            return cls(hidden_size=h_size, cross_attention_dim=ca_dim, rank=rank)
-                        except Exception as e:
-                            nonlocal last_err
-                            last_err = e
-                        # Try positional (hidden_size, cross_attention_dim, rank)
-                        try:
-                            return cls(h_size, ca_dim, rank=rank)
-                        except Exception as e:
-                            last_err = e
-                        # Try positional without rank
-                        try:
-                            return cls(h_size, ca_dim)
-                        except Exception as e:
-                            last_err = e
-                        # Try kwargs without hidden_size
-                        try:
-                            return cls(cross_attention_dim=ca_dim, rank=rank)
-                        except Exception as e:
-                            last_err = e
-                        # Try hidden_size + rank only
-                        try:
-                            return cls(hidden_size=h_size, rank=rank)
-                        except Exception as e:
-                            last_err = e
-                        return None
-
-                    # Prefer original class; if fails across patterns, try LoRAAttnProcessor2 if available
-                    obj = _try_make(LoRAAttnProcessor)
-                    if obj is None and LoRAAttnProcessor2 is not None:
-                        obj = _try_make(LoRAAttnProcessor2)
-                    if obj is None:
-                        raise TypeError(f"Failed to construct LoRA attention processor with any known signature (last error: {last_err})")
-                    return obj
-
-                # Build a full mapping covering all attention processors: keep originals for unselected keys
-                all_keys = list(self.pipe.unet.attn_processors.keys())
-                new_procs = dict(self.pipe.unet.attn_processors)
-                selected = 0
-                for name in all_keys:
-                    unet_scoped_name = f"unet.{name}"
-                    # Respect learnable filter if provided
-                    if len(learnable) > 0 and not any(patt in unet_scoped_name for patt in learnable):
-                        continue
-                    cross_attention_dim = None if name.endswith("attn1.processor") else self.pipe.unet.config.cross_attention_dim
-                    if name.startswith("mid_block"):
-                        hidden_size = self.pipe.unet.config.block_out_channels[-1]
-                    elif name.startswith("up_blocks"):
-                        block_id = int(name[len("up_blocks."):].split(".")[0])
-                        hidden_size = list(reversed(self.pipe.unet.config.block_out_channels))[block_id]
-                    elif name.startswith("down_blocks"):
-                        block_id = int(name[len("down_blocks."):].split(".")[0])
-                        hidden_size = self.pipe.unet.config.block_out_channels[block_id]
-                    else:
-                        hidden_size = self.pipe.unet.config.block_out_channels[0]
+                # Normalize layer patterns from config (support aliases like up_blocks[-1])
+                def _normalize_patterns(pats: List[str]) -> List[str]:
+                    norm: List[str] = []
                     try:
-                        new_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
-                        selected += 1
-                    except Exception as e:
-                        print(f"[LoRA][SKIP] could not create processor for {name}: {e}")
-
-                if selected == 0:
-                    # If filter eliminated all, attempt to LoRA-ize all keys
-                    for name in all_keys:
-                        cross_attention_dim = None if name.endswith("attn1.processor") else self.pipe.unet.config.cross_attention_dim
-                        if name.startswith("mid_block"):
-                            hidden_size = self.pipe.unet.config.block_out_channels[-1]
-                        elif name.startswith("up_blocks"):
-                            block_id = int(name[len("up_blocks."):].split(".")[0])
-                            hidden_size = list(reversed(self.pipe.unet.config.block_out_channels))[block_id]
-                        elif name.startswith("down_blocks"):
-                            block_id = int(name[len("down_blocks."):].split(".")[0])
-                            hidden_size = self.pipe.unet.config.block_out_channels[block_id]
-                        else:
-                            hidden_size = self.pipe.unet.config.block_out_channels[0]
-                        try:
-                            new_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
-                        except Exception as e:
-                            print(f"[LoRA][SKIP] could not create processor for {name}: {e}")
-                    selected = len(all_keys)
-
-                # Set processors: full-size mapping prevents size mismatch errors
-                self.pipe.unet.set_attn_processor(new_procs)
-
-                if AttnProcsLayers is not None:
-                    lora_layers = AttnProcsLayers(self.pipe.unet.attn_processors)
-                    for p in lora_layers.parameters():
-                        p.requires_grad_(True)
-                    try:
-                        dtype_to_use = torch.float16 if (self.device.type == 'cuda') else torch.float32
-                        lora_layers.to(self.device, dtype=dtype_to_use)
+                        last_up = len(self.pipe.unet.up_blocks) - 1  # type: ignore
                     except Exception:
-                        try:
-                            lora_layers.to(self.device)
-                        except Exception:
-                            pass
-                    self._trainable_params = list(lora_layers.parameters())
-                else:
-                    # Fallback: gather params directly from created LoRA processors
-                    collected: List[torch.nn.Parameter] = []
-                    for proc_name, proc in self.pipe.unet.attn_processors.items():
-                        for p in proc.parameters():
+                        last_up = 3
+                    for s in pats:
+                        s2 = s.replace("unet.", "")
+                        s2 = s2.replace("[0]", ".0").replace("[1]", ".1").replace("[2]", ".2").replace("[3]", ".3")
+                        s2 = s2.replace(".attentions[", ".attentions.")
+                        if "up_blocks[-1]" in s2:
+                            s2 = s2.replace("up_blocks[-1]", f"up_blocks.{last_up}")
+                        norm.append(s2)
+                    return norm
+
+                lora_rank = int(self.finetune_cfg.get("lora_rank", 8))
+                learnable_cfg = self.finetune_cfg.get("learnable_layers", ["unet.up_blocks[-1]"])
+                patterns = _normalize_patterns(learnable_cfg)
+
+                # Preferred modern path: LoRAConfig + add_attn_procs
+                try:
+                    from diffusers.models.lora import LoRAConfig  # type: ignore
+                    unet = self.pipe.unet
+                    lora_config = LoRAConfig(
+                        r=lora_rank,
+                        lora_alpha=lora_rank,
+                        target_modules=["to_q", "to_k", "to_v", "to_out.0"],
+                        init_lora_weights="gaussian",
+                    )
+                    unet.add_attn_procs(lora_config)
+                    # Enable grads only for selected blocks
+                    params: List[torch.nn.Parameter] = []
+                    for name, module in unet.attn_processors.items():  # type: ignore[attr-defined]
+                        scope_name = f"unet.{name}"
+                        if patterns and not any(pat in scope_name for pat in patterns):
+                            for p in module.parameters():
+                                p.requires_grad_(False)
+                            continue
+                        for p in module.parameters():
                             p.requires_grad_(True)
-                            collected.append(p)
-                    # Move each processor to device/dtype
-                    try:
-                        dtype_to_use = torch.float16 if (self.device.type == 'cuda') else torch.float32
-                        for proc in self.pipe.unet.attn_processors.values():
-                            proc.to(self.device, dtype=dtype_to_use)
-                    except Exception:
-                        try:
-                            for proc in self.pipe.unet.attn_processors.values():
-                                proc.to(self.device)
-                        except Exception:
-                            pass
-                    self._trainable_params = collected
-
-                # Optional info
-                try:
-                    n_train = sum(int(p.numel()) for p in self._trainable_params)
-                    layer_count = len(self._trainable_params)
-                    print(f"[LoRA] Enabled LoRA rank={r}, layers={layer_count}, trainable params={n_train:,}")
-                except Exception:
-                    pass
+                            params.append(p)
+                    self._trainable_params = params
+                    print(f"[LoRA] Applied LoRAConfig rank={lora_rank} selected_layers={len(params)}")
+                except Exception as e_conf:
+                    # Fallback: use AttnProcessor2_0 and selectively unfreeze parameters by name
+                    print(f"[LoRA] LoRAConfig path failed ({e_conf}); falling back to selective AttnProcessor2_0.")
+                    for p in self.pipe.unet.parameters():
+                        p.requires_grad_(False)
+                    self.pipe.unet.set_attn_processor(AttnProcessor2_0())
+                    params: List[torch.nn.Parameter] = []
+                    for n, p in self.pipe.unet.named_parameters():
+                        if any(pat in n for pat in patterns):
+                            p.requires_grad_(True)
+                            params.append(p)
+                    if len(params) == 0:
+                        # last resort: allow last up_block attention weights
+                        for n, p in self.pipe.unet.named_parameters():
+                            if "up_blocks." in n and ("attn" in n or "attention" in n):
+                                p.requires_grad_(True)
+                                params.append(p)
+                    self._trainable_params = params
+                    print(f"[LoRA/Fallback] selected_params={len(params)}")
             except Exception as e:
                 # As a last resort, fallback to enabling a small subset of UNet attention linear layers for finetuning
                 print(f"[WARN] LoRA setup failed; attempting partial UNet finetune fallback: {e}")
@@ -440,6 +352,17 @@ class GeneratorWrapper(nn.Module):
                 pass
         else:
             raise ValueError(f"Unknown generator backend: {self.backend}")
+
+    def ensure_initialized(self) -> None:
+        """Ensure lazy backends (diffusers) are initialized before optimizer setup.
+        This helps make sure LoRA or attention-processor params are created in time.
+        """
+        if self.backend == "diffusers":
+            try:
+                # type: ignore[attr-defined]
+                self.net._maybe_init()
+            except Exception:
+                pass
 
     def forward(self, img: torch.Tensor, mask: torch.Tensor, prompt: str = "", negative_prompt: Optional[str] = None,
                 cond: Optional[Dict[str, Any]] = None, steps: Optional[int] = None, guidance_scale: Optional[float] = None,
