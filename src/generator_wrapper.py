@@ -360,6 +360,16 @@ class DiffusersInpaintBackend(nn.Module):
             # Convert images from [-1,1] to [0,1] as expected by diffusers when tensors are provided
             img01 = (img.clamp(-1, 1) * 0.5 + 0.5).to(self.device)
             mask01 = mask.clamp(0, 1).to(self.device)
+            # SD Inpaint expects mask as [B, H, W] (float, 1=inpaint, 0=keep); squeeze channel dim if present
+            if mask01.dim() == 4 and mask01.size(1) == 1:
+                mask02 = mask01[:, 0, :, :]
+            elif mask01.dim() == 3:
+                mask02 = mask01
+            else:
+                # Attempt to coerce to [B,H,W]
+                mask02 = mask01
+                if mask02.dim() > 3:
+                    mask02 = mask02.squeeze(1)
             # Optional deterministic seed
             gen = None
             if seed is not None:
@@ -367,13 +377,19 @@ class DiffusersInpaintBackend(nn.Module):
                     gen = torch.Generator(device=self.device).manual_seed(int(seed))
                 except Exception:
                     gen = torch.Generator().manual_seed(int(seed))
+            # Disable classifier-free guidance during training to avoid batch-mismatch in tensor inpaint path
+            # (diffusers duplicates mask/image latents internally when CFG is enabled, which can mismatch shapes at concat time)
+            cfg_gs = float(guidance_scale) if guidance_scale is not None else self.guidance_scale
+            if cfg_gs is None:
+                cfg_gs = 7.5
+            train_guidance = 1.0  # force off CFG for stable training grads
             kwargs = dict(
                 prompt=prompt_use,
                 negative_prompt=neg_use if neg_use else None,
                 image=img01,
-                mask_image=mask01,
+                mask_image=mask02,
                 num_inference_steps=int(steps) if steps is not None else self.steps,
-                guidance_scale=float(guidance_scale) if guidance_scale is not None else self.guidance_scale,
+                guidance_scale=train_guidance,
                 generator=gen,
                 output_type="pt",
                 return_dict=True,
@@ -383,6 +399,8 @@ class DiffusersInpaintBackend(nn.Module):
                     kwargs["strength"] = float(strength)
                 except Exception:
                     pass
+            # Some pipelines expect 8-bit mask semantics (1=inpaint). Ensure float32 for stability.
+            kwargs["mask_image"] = kwargs["mask_image"].to(dtype=torch.float32)
             out = self.pipe(**kwargs).images  # torch.Tensor [B, C, H, W] in [0,1]
             out = out.to(img.device)
             out_t = out * 2 - 1  # to [-1,1]
