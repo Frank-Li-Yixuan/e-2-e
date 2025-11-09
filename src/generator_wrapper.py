@@ -360,16 +360,17 @@ class DiffusersInpaintBackend(nn.Module):
             # Convert images from [-1,1] to [0,1] as expected by diffusers when tensors are provided
             img01 = (img.clamp(-1, 1) * 0.5 + 0.5).to(self.device)
             mask01 = mask.clamp(0, 1).to(self.device)
-            # SD Inpaint expects mask as [B, H, W] (float, 1=inpaint, 0=keep); squeeze channel dim if present
-            if mask01.dim() == 4 and mask01.size(1) == 1:
-                mask02 = mask01[:, 0, :, :]
-            elif mask01.dim() == 3:
-                mask02 = mask01
+            # SD Inpaint tensor path is most stable with mask as [B,1,H,W] float, where 1=inpaint, 0=keep
+            if mask01.dim() == 3:
+                mask02 = mask01.unsqueeze(1)
+            elif mask01.dim() == 4 and mask01.size(1) in (1, 3):
+                # If accidentally RGB mask, reduce to single channel
+                mask02 = mask01[:, :1, :, :]
             else:
-                # Attempt to coerce to [B,H,W]
+                # Coerce to [B,1,H,W]
                 mask02 = mask01
-                if mask02.dim() > 3:
-                    mask02 = mask02.squeeze(1)
+                while mask02.dim() < 4:
+                    mask02 = mask02.unsqueeze(1)
             # Optional deterministic seed
             gen = None
             if seed is not None:
@@ -385,7 +386,7 @@ class DiffusersInpaintBackend(nn.Module):
             train_guidance = 1.0  # force off CFG for stable training grads
             kwargs = dict(
                 prompt=prompt_use,
-                negative_prompt=neg_use if neg_use else None,
+                negative_prompt=None,  # disable negative prompts in training to fully avoid CFG branching
                 image=img01,
                 mask_image=mask02,
                 num_inference_steps=int(steps) if steps is not None else self.steps,
@@ -393,6 +394,7 @@ class DiffusersInpaintBackend(nn.Module):
                 generator=gen,
                 output_type="pt",
                 return_dict=True,
+                num_images_per_prompt=1,
             )
             if strength is not None:
                 try:
