@@ -21,8 +21,20 @@ class AnonyDataModule(pl.LightningDataModule):
             self._val_loader = va
 
     def train_dataloader(self) -> DataLoader:
+        # Be robust to callers that access train_dataloader before setup()
+        if self._train_loader is None:
+            try:
+                self.setup("fit")
+            except Exception:
+                self.setup(None)
         assert self._train_loader is not None, "DataModule not set up"
         return self._train_loader
 
     def val_dataloader(self) -> Optional[DataLoader]:
+        # Likewise, lazily build validation dataloader if needed
+        if self._val_loader is None:
+            try:
+                self.setup("validate")
+            except Exception:
+                self.setup(None)
         return self._val_loader

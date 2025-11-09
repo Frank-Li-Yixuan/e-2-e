@@ -76,6 +76,9 @@ def main():
 
     # Manual optimization is used in AnonyLightningModule, so we must NOT pass gradient_clip_val to Trainer.
     # Gradient clipping is performed inside training_step manually.
+    # Allow configuring or disabling sanity validation steps to avoid noisy failures on empty val
+    num_sanity_val_steps = int(eval_cfg.get("num_sanity_val_steps", 0) or 0)
+
     trainer = pl.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "auto",
         devices=1,
@@ -88,6 +91,7 @@ def main():
         enable_progress_bar=True,
         val_check_interval=val_check_interval,
         limit_val_batches=limit_val_batches if limit_val_batches > 0 else None,
+        num_sanity_val_steps=num_sanity_val_steps,
     )
 
     trainer.fit(model, datamodule=dm)
