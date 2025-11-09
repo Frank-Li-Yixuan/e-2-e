@@ -42,6 +42,28 @@ def main():
         cfg["train"]["max_steps"] = int(args.max_steps)
         print(f"[INFO] Overriding train.max_steps to {int(args.max_steps)} via CLI")
 
+    # Auto-apply default paths overlay if not provided and file exists
+    if not args.paths_overlay:
+        default_overlay = os.path.join(os.path.dirname(args.config), 'paths_overlay.yaml')
+        if os.path.exists(default_overlay):
+            try:
+                with open(default_overlay, 'r', encoding='utf-8') as f:
+                    overlay = yaml.safe_load(f) or {}
+                if isinstance(overlay, dict) and 'paths' in overlay and isinstance(overlay['paths'], dict):
+                    base = cfg.get('paths', {}) or {}
+                    base.update(overlay['paths'])
+                    cfg['paths'] = base
+                    print(f"[INFO] Auto-applied default paths overlay: {default_overlay}")
+            except Exception as e:
+                print(f"[WARN] Failed to auto-apply default overlay: {e}")
+
+    # If still missing essential paths, print a helpful hint
+    p = cfg.get('paths', {}) or {}
+    if not p.get('train_images') or not p.get('val_images'):
+        print("[HINT] paths.train_images/val_images not set. You can generate configs/paths_overlay.yaml by running:\n"
+              "  %run scripts/colab_paths_autoset.py --mode auto\n"
+              "and then pass: --paths-overlay configs/paths_overlay.yaml")
+
     # Reproducibility (optional deterministic)
     try:
         seed = int(cfg.get("seed", 42))
@@ -52,6 +74,14 @@ def main():
             torch.backends.cudnn.benchmark = False  # type: ignore[attr-defined]
     except Exception:
         pass
+
+    # Enable Tensor Cores matmul for Ampere+ GPUs (A100) for speed
+    if torch.cuda.is_available():
+        try:
+            torch.set_float32_matmul_precision('high')
+            print("[INFO] Set torch.set_float32_matmul_precision('high') for Tensor Cores.")
+        except Exception:
+            pass
 
     model = AnonyLightningModule(cfg)
     dm = AnonyDataModule(cfg)
