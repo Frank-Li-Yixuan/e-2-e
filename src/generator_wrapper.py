@@ -272,8 +272,27 @@ class DiffusersInpaintBackend(nn.Module):
                 except Exception:
                     pass
             except Exception as e:
-                print(f"[WARN] LoRA setup failed; continuing without LoRA: {e}")
-                self._trainable_params = []
+                # As a last resort, fallback to enabling a small subset of UNet attention linear layers for finetuning
+                print(f"[WARN] LoRA setup failed; attempting partial UNet finetune fallback: {e}")
+                try:
+                    patterns = [
+                        ".attn1.to_q.weight", ".attn1.to_v.weight", ".attn1.to_out.0.weight",
+                        ".attn2.to_q.weight", ".attn2.to_v.weight", ".attn2.to_out.0.weight",
+                    ]
+                    collected: List[torch.nn.Parameter] = []
+                    for n, p in self.pipe.unet.named_parameters():
+                        if any(pat in n for pat in patterns):
+                            p.requires_grad_(True)
+                            collected.append(p)
+                    self._trainable_params = collected
+                    try:
+                        n_train = sum(int(p.numel()) for p in self._trainable_params)
+                        print(f"[LoRA-Fallback] Enabled partial UNet finetune on attention linear layers; trainable params={n_train:,}")
+                    except Exception:
+                        pass
+                except Exception as e2:
+                    print(f"[WARN] Partial UNet finetune fallback also failed; proceeding without trainable generator params: {e2}")
+                    self._trainable_params = []
 
     def _trim_prompt(self, text: Optional[str]) -> Optional[str]:
         if text is None or text == "":
