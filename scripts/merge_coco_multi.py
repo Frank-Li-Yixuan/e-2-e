@@ -63,6 +63,53 @@ def rebase_file_names(coco: Dict, src_images_root: Path, common_root: Path) -> N
         im['file_name'] = rel.as_posix()
 
 
+def filter_and_validate(coco: Dict, common_root: Path, drop_missing: bool = False, exclude_substr: List[str] = None, label: str = "") -> Dict:
+    """Optionally exclude images by substring and/or drop images whose files don't exist under common_root.
+
+    Returns a new COCO dict containing only kept images/annotations. Prints a brief summary and first missing example.
+    """
+    exclude_substr = exclude_substr or []
+    images = coco.get('images', [])
+    anns = coco.get('annotations', [])
+    kept_images = []
+    kept_fns = set()
+    missing_examples = []
+    excluded = 0
+    missing = 0
+
+    for im in images:
+        fn = str(im.get('file_name', ''))
+        if any(sub in fn for sub in exclude_substr):
+            excluded += 1
+            continue
+        full = (common_root / fn)
+        if not full.exists():
+            missing += 1
+            if len(missing_examples) < 3:
+                missing_examples.append(full.as_posix())
+            if drop_missing:
+                continue
+        kept_images.append(im)
+        kept_fns.add(fn)
+
+    # Filter annotations to those whose image file_name is kept
+    id_map = {im['id']: im['file_name'] for im in kept_images}
+    kept_anns = [a for a in anns if id_map.get(a.get('image_id')) in kept_fns]
+
+    if excluded or missing:
+        tag = f"[{label}] " if label else ""
+        print(f"{tag}Excluded by substr: {excluded}, Missing on disk: {missing}, Kept images: {len(kept_images)}")
+        if missing and not drop_missing:
+            for ex in missing_examples:
+                print(f"{tag}First missing example: {ex}")
+
+    out = dict(coco)
+    out['images'] = kept_images
+    out['annotations'] = kept_anns
+    # categories untouched
+    return out
+
+
 def build_id_maps(coco: Dict):
     id_to_fn = {im['id']: im['file_name'] for im in coco.get('images', [])}
     return id_to_fn
@@ -153,6 +200,8 @@ def main():
     ap.add_argument('--plates-root', action='append', default=[], help='Images root for the corresponding plate dataset; order must match --plates-ann')
     ap.add_argument('--common-images-root', required=True, help='A parent directory that contains all images roots; file_name will be relative to this')
     ap.add_argument('--out-train', required=True, help='Output path for merged unified_train.json')
+    ap.add_argument('--drop-missing', action='store_true', help='Drop images whose files do not exist under common root')
+    ap.add_argument('--exclude-substr', action='append', default=[], help='Exclude images whose file_name contains this substring; can repeat')
     args = ap.parse_args()
 
     if len(args.plates_ann) != len(args.plates_root):
@@ -167,11 +216,13 @@ def main():
     face_coco = load_json(faces_ann)
     # Rebase file_name for faces
     rebase_file_names(face_coco, faces_root, common_root)
+    face_coco = filter_and_validate(face_coco, common_root, drop_missing=args.drop_missing, exclude_substr=args.exclude_substr, label='faces')
 
     plate_cocos: List[Dict] = []
     for ann_p, root_p in zip(plates_anns, plates_roots):
         pc = load_json(ann_p)
         rebase_file_names(pc, root_p, common_root)
+        pc = filter_and_validate(pc, common_root, drop_missing=args.drop_missing, exclude_substr=args.exclude_substr, label='plates')
         plate_cocos.append(pc)
 
     merged = merge_faces_plates(face_coco, plate_cocos)

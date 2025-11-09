@@ -1,0 +1,13 @@
+paths:
+  # 为了统一引用多数据源图像，将 train_images 设为公共父目录
+  train_images: /content/drive/MyDrive
+  # 使用 merge 脚本生成的合并标注文件
+  train_annotations: /content/unified/unified_train.json
+
+  # 验证集扁平化目录（之前已导出）
+  val_images: /content/drive/MyDrive/val_images
+  val_annotations: /content/drive/MyDrive/val_images/unified_val_local.json
+
+  # 可选：若有掩码或伪目标目录再补充
+  # val_masks: /content/drive/MyDrive/val_masks
+  # pseudotargets: /content/drive/MyDrive/pseudotargets

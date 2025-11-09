@@ -64,6 +64,51 @@ def main():
               "  %run scripts/colab_paths_autoset.py --mode auto\n"
               "and then pass: --paths-overlay configs/paths_overlay.yaml")
 
+    # Early strict path validation to prevent silent fallback to val when train root is wrong.
+    def _validate_split(split: str) -> None:
+        root = p.get(f"{split}_images")
+        ann = p.get(f"{split}_annotations")
+        if split == "train":
+            if not root or not os.path.exists(root):
+                raise RuntimeError(f"[PATH ERROR] paths.train_images root missing: {root}")
+            if not ann or not os.path.exists(ann):
+                raise RuntimeError(f"[PATH ERROR] paths.train_annotations missing: {ann}")
+            # Verify one sample joins correctly (first image in COCO) to catch wrong root like /content/dunified/images
+            try:
+                with open(ann, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f) if ann.endswith('.yaml') else None
+                if data is None and ann.endswith('.json'):
+                    import json as _json
+                    with open(ann, 'r', encoding='utf-8') as jf:
+                        j = _json.load(jf)
+                    images = j.get('images', [])
+                    if images:
+                        sample_name = images[0].get('file_name')
+                        if isinstance(sample_name, str):
+                            sample_path = os.path.join(root, sample_name)
+                            if not os.path.exists(sample_path):
+                                raise RuntimeError(
+                                    f"[PATH ERROR] Sample image not found under train_images root: {sample_path}. \n"
+                                    f"Likely train_images is incorrect. Try setting train_images to the common Drive root (e.g. /content/drive/MyDrive)."
+                                )
+                        else:
+                            print("[WARN] First image file_name not a string; skipping sample path check.")
+            except Exception as e:
+                raise RuntimeError(f"[PATH ERROR] Failed to inspect train annotation {ann}: {e}")
+        else:
+            # For val, just warn instead of raising
+            if root and not os.path.exists(root):
+                print(f"[WARN] val_images root missing: {root}")
+            if ann and not os.path.exists(ann):
+                print(f"[WARN] val_annotations missing: {ann}")
+
+    try:
+        if p.get('train_images') and p.get('train_annotations'):
+            _validate_split('train')
+    except Exception as e:
+        # Fail fast before building dataloaders (better than silent fallback)
+        raise
+
     # Reproducibility (optional deterministic)
     try:
         seed = int(cfg.get("seed", 42))

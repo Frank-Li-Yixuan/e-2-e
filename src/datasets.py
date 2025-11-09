@@ -268,7 +268,11 @@ def build_dataloaders(cfg: Dict[str, Any]) -> Tuple[Optional[DataLoader], Option
             sampler = WeightedRandomSampler(weights, num_samples=len(ds), replacement=True)
             shuffle = False
         # DataLoader stability knobs
-        num_workers = int(cfg.get("train", {}).get("num_workers", 4))
+        # Prefer data.num_workers (dataset specific) then train.num_workers, fallback to 4
+        num_workers = int(
+            cfg.get("data", {}).get("num_workers",
+                    cfg.get("train", {}).get("num_workers", 4))
+        )
         persistent_workers = bool(cfg.get("train", {}).get("persistent_workers", False)) and num_workers > 0
         prefetch_factor = int(cfg.get("train", {}).get("prefetch_factor", 2)) if num_workers > 0 else None
 

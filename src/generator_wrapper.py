@@ -115,6 +115,11 @@ class DiffusersInpaintBackend(nn.Module):
 
                 # Build per-attention processor LoRA modules
                 from diffusers.models.attention_processor import LoRAAttnProcessor  # type: ignore
+                # Optional newer variant used with SDPA in some versions
+                try:
+                    from diffusers.models.attention_processor import LoRAAttnProcessor2  # type: ignore
+                except Exception:
+                    LoRAAttnProcessor2 = None  # type: ignore
                 # AttnProcsLayers may not exist in some diffusers versions; fallback to manual param collection.
                 try:
                     from diffusers.training_utils import AttnProcsLayers  # type: ignore
@@ -123,6 +128,56 @@ class DiffusersInpaintBackend(nn.Module):
 
                 r = int(self.finetune_cfg.get("lora_rank", 8))
                 learnable: List[str] = list(self.finetune_cfg.get("learnable_layers", []))
+
+                # Helper: create LoRA processor robustly across diffusers versions (different ctor signatures)
+                def _make_lora_proc(h_size: int, ca_dim: Optional[int], rank: int):
+                    """Try multiple constructor patterns for LoRAAttnProcessor to handle API drift.
+
+                    Older / newer diffusers versions have accepted:
+                      LoRAAttnProcessor(hidden_size=..., cross_attention_dim=..., rank=...)
+                      LoRAAttnProcessor(hidden_size=..., cross_attention_dim=..., rank=...)
+                      LoRAAttnProcessor(hidden_size, cross_attention_dim, rank=...)
+                      LoRAAttnProcessor(hidden_size, cross_attention_dim)
+                      LoRAAttnProcessor(cross_attention_dim=..., rank=...)
+                    We brute-force small permutations until one works.
+                    """
+                    last_err = None
+                    def _try_make(cls):
+                        # Try canonical kwargs
+                        try:
+                            return cls(hidden_size=h_size, cross_attention_dim=ca_dim, rank=rank)
+                        except Exception as e:
+                            nonlocal last_err
+                            last_err = e
+                        # Try positional (hidden_size, cross_attention_dim, rank)
+                        try:
+                            return cls(h_size, ca_dim, rank=rank)
+                        except Exception as e:
+                            last_err = e
+                        # Try positional without rank
+                        try:
+                            return cls(h_size, ca_dim)
+                        except Exception as e:
+                            last_err = e
+                        # Try kwargs without hidden_size
+                        try:
+                            return cls(cross_attention_dim=ca_dim, rank=rank)
+                        except Exception as e:
+                            last_err = e
+                        # Try hidden_size + rank only
+                        try:
+                            return cls(hidden_size=h_size, rank=rank)
+                        except Exception as e:
+                            last_err = e
+                        return None
+
+                    # Prefer original class; if fails across patterns, try LoRAAttnProcessor2 if available
+                    obj = _try_make(LoRAAttnProcessor)
+                    if obj is None and LoRAAttnProcessor2 is not None:
+                        obj = _try_make(LoRAAttnProcessor2)
+                    if obj is None:
+                        raise TypeError(f"Failed to construct LoRA attention processor with any known signature (last error: {last_err})")
+                    return obj
 
                 # Map each attention processor name to an appropriate LoRA processor
                 lora_attn_procs = {}
@@ -149,11 +204,10 @@ class DiffusersInpaintBackend(nn.Module):
                         # default fallback
                         hidden_size = self.pipe.unet.config.block_out_channels[0]
 
-                    lora_attn_procs[name] = LoRAAttnProcessor(
-                        hidden_size=hidden_size,
-                        cross_attention_dim=cross_attention_dim,
-                        rank=r,
-                    )
+                    try:
+                        lora_attn_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
+                    except Exception as e:
+                        print(f"[LoRA][SKIP] could not create processor for {name}: {e}")
 
                 if len(lora_attn_procs) == 0:
                     # If user patterns filter everything out, fallback to enabling all
@@ -169,11 +223,10 @@ class DiffusersInpaintBackend(nn.Module):
                             hidden_size = self.pipe.unet.config.block_out_channels[block_id]
                         else:
                             hidden_size = self.pipe.unet.config.block_out_channels[0]
-                        lora_attn_procs[name] = LoRAAttnProcessor(
-                            hidden_size=hidden_size,
-                            cross_attention_dim=cross_attention_dim,
-                            rank=r,
-                        )
+                        try:
+                            lora_attn_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
+                        except Exception as e:
+                            print(f"[LoRA][SKIP] could not create processor for {name}: {e}")
 
                 # Set LoRA processors into the UNet
                 self.pipe.unet.set_attn_processor(lora_attn_procs)
