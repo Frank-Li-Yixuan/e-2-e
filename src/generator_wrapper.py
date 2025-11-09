@@ -115,7 +115,11 @@ class DiffusersInpaintBackend(nn.Module):
 
                 # Build per-attention processor LoRA modules
                 from diffusers.models.attention_processor import LoRAAttnProcessor  # type: ignore
-                from diffusers.training_utils import AttnProcsLayers  # type: ignore
+                # AttnProcsLayers may not exist in some diffusers versions; fallback to manual param collection.
+                try:
+                    from diffusers.training_utils import AttnProcsLayers  # type: ignore
+                except Exception:
+                    AttnProcsLayers = None  # type: ignore
 
                 r = int(self.finetune_cfg.get("lora_rank", 8))
                 learnable: List[str] = list(self.finetune_cfg.get("learnable_layers", []))
@@ -174,26 +178,44 @@ class DiffusersInpaintBackend(nn.Module):
                 # Set LoRA processors into the UNet
                 self.pipe.unet.set_attn_processor(lora_attn_procs)
 
-                # Collect LoRA parameters only
-                lora_layers = AttnProcsLayers(self.pipe.unet.attn_processors)
-                # Ensure all LoRA params are trainable
-                for p in lora_layers.parameters():
-                    p.requires_grad_(True)
-                # Move LoRA layers to the same device/dtype as UNet
-                try:
-                    dtype_to_use = torch.float16 if (self.device.type == 'cuda') else torch.float32
-                    lora_layers.to(self.device, dtype=dtype_to_use)
-                except Exception:
+                if AttnProcsLayers is not None:
+                    lora_layers = AttnProcsLayers(self.pipe.unet.attn_processors)
+                    for p in lora_layers.parameters():
+                        p.requires_grad_(True)
                     try:
-                        lora_layers.to(self.device)
+                        dtype_to_use = torch.float16 if (self.device.type == 'cuda') else torch.float32
+                        lora_layers.to(self.device, dtype=dtype_to_use)
                     except Exception:
-                        pass
-                self._trainable_params = list(lora_layers.parameters())
+                        try:
+                            lora_layers.to(self.device)
+                        except Exception:
+                            pass
+                    self._trainable_params = list(lora_layers.parameters())
+                else:
+                    # Fallback: gather params directly from created LoRA processors
+                    collected: List[torch.nn.Parameter] = []
+                    for proc_name, proc in self.pipe.unet.attn_processors.items():
+                        for p in proc.parameters():
+                            p.requires_grad_(True)
+                            collected.append(p)
+                    # Move each processor to device/dtype
+                    try:
+                        dtype_to_use = torch.float16 if (self.device.type == 'cuda') else torch.float32
+                        for proc in self.pipe.unet.attn_processors.values():
+                            proc.to(self.device, dtype=dtype_to_use)
+                    except Exception:
+                        try:
+                            for proc in self.pipe.unet.attn_processors.values():
+                                proc.to(self.device)
+                        except Exception:
+                            pass
+                    self._trainable_params = collected
 
                 # Optional info
                 try:
                     n_train = sum(int(p.numel()) for p in self._trainable_params)
-                    print(f"[LoRA] Enabled LoRA on UNet with rank={r}, trainable params={n_train:,}")
+                    layer_count = len(self._trainable_params)
+                    print(f"[LoRA] Enabled LoRA rank={r}, layers={layer_count}, trainable params={n_train:,}")
                 except Exception:
                     pass
             except Exception as e:
