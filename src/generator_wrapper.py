@@ -363,9 +363,12 @@ class DiffusersInpaintBackend(nn.Module):
             # SD Inpaint tensor path is most stable with mask as [B,1,H,W] float, where 1=inpaint, 0=keep
             if mask01.dim() == 3:
                 mask02 = mask01.unsqueeze(1)
-            elif mask01.dim() == 4 and mask01.size(1) in (1, 3):
-                # If accidentally RGB mask, reduce to single channel
-                mask02 = mask01[:, :1, :, :]
+            elif mask01.dim() == 4:
+                # Ensure single-channel [B,1,H,W] regardless of source channels (e.g., 2,3)
+                if mask01.size(1) == 1:
+                    mask02 = mask01
+                else:
+                    mask02 = mask01[:, :1, :, :]
             else:
                 # Coerce to [B,1,H,W]
                 mask02 = mask01
@@ -378,15 +381,16 @@ class DiffusersInpaintBackend(nn.Module):
                     gen = torch.Generator(device=self.device).manual_seed(int(seed))
                 except Exception:
                     gen = torch.Generator().manual_seed(int(seed))
-            # Disable classifier-free guidance during training to avoid batch-mismatch in tensor inpaint path
-            # (diffusers duplicates mask/image latents internally when CFG is enabled, which can mismatch shapes at concat time)
-            cfg_gs = float(guidance_scale) if guidance_scale is not None else self.guidance_scale
-            if cfg_gs is None:
-                cfg_gs = 7.5
-            train_guidance = 1.0  # force off CFG for stable training grads
+            # Disable CFG (guidance=1.0) to simplify latent batching; also ensure prompt batch matches image batch
+            bsz = img01.size(0)
+            if isinstance(prompt_use, str):
+                prompt_batched = [prompt_use] * bsz
+            else:
+                prompt_batched = prompt_use
+            train_guidance = 1.0
             kwargs = dict(
-                prompt=prompt_use,
-                negative_prompt=None,  # disable negative prompts in training to fully avoid CFG branching
+                prompt=prompt_batched,
+                negative_prompt=None,  # keep CFG path disabled
                 image=img01,
                 mask_image=mask02,
                 num_inference_steps=int(steps) if steps is not None else self.steps,
