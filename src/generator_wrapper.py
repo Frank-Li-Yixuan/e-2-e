@@ -106,7 +106,6 @@ class DiffusersInpaintBackend(nn.Module):
         if self.finetune_cfg.get("use_lora", False):
             try:
                 import diffusers as _df
-                from diffusers import AttnProcessor2_0  # type: ignore
                 print(f"[LoRA/Debug] diffusers.__version__={getattr(_df, '__version__', 'unknown')}")
 
                 # Freeze base UNet and text encoder (we only train adapters)
@@ -225,6 +224,17 @@ class DiffusersInpaintBackend(nn.Module):
                 except Exception as e_conf:
                     # Fallback: use AttnProcessor2_0 and selectively unfreeze parameters by name
                     print(f"[LoRA] LoRAConfig path failed ({e_conf}); falling back to selective AttnProcessor2_0.")
+                    # Import AttnProcessor2_0 lazily with robust import paths
+                    AttnProcessor2_0 = None
+                    try:
+                        from diffusers.models.attention_processor import AttnProcessor2_0  # type: ignore
+                    except Exception:
+                        try:
+                            from diffusers import AttnProcessor2_0  # type: ignore
+                        except Exception:
+                            AttnProcessor2_0 = None  # type: ignore
+                    if AttnProcessor2_0 is None:
+                        raise RuntimeError("AttnProcessor2_0 not available in this diffusers version")
                     for p in self.pipe.unet.parameters():
                         p.requires_grad_(False)
                     self.pipe.unet.set_attn_processor(AttnProcessor2_0())
@@ -332,18 +342,24 @@ class DiffusersInpaintBackend(nn.Module):
         except Exception:
             return text
 
-    @torch.no_grad()
     def generate(self, img: torch.Tensor, mask: torch.Tensor, prompt: str = "", negative_prompt: Optional[str] = None,
                  cond: Optional[Dict[str, Any]] = None, steps: Optional[int] = None, guidance_scale: Optional[float] = None,
                  seed: Optional[int] = None, strength: Optional[float] = None) -> torch.Tensor:
         self._maybe_init()
         assert self.pipe is not None
-        # Convert to PIL HWC
-        b = img.size(0)
-        outs: List[torch.Tensor] = []
-        for i in range(b):
-            pil_img = Image.fromarray(denorm_to_uint8(img[i]))
-            pil_mask = Image.fromarray((mask[i].squeeze(0).clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8))
+        # Decide whether to enable gradient path (for LoRA training) or use fast no-grad path
+        grad_enabled = bool(self.finetune_cfg.get("use_lora", False)) and self.training
+
+        # Prepare common kwargs
+        # Trim prompts to avoid CLIP truncation warnings (77 token max incl. specials)
+        prompt_use = self._trim_prompt(prompt)
+        neg_use = self._trim_prompt(negative_prompt if negative_prompt else None)
+
+        if grad_enabled:
+            # Tensor path with output_type="pt" to keep computation graph for LoRA params
+            # Convert images from [-1,1] to [0,1] as expected by diffusers when tensors are provided
+            img01 = (img.clamp(-1, 1) * 0.5 + 0.5).to(self.device)
+            mask01 = mask.clamp(0, 1).to(self.device)
             # Optional deterministic seed
             gen = None
             if seed is not None:
@@ -351,34 +367,66 @@ class DiffusersInpaintBackend(nn.Module):
                     gen = torch.Generator(device=self.device).manual_seed(int(seed))
                 except Exception:
                     gen = torch.Generator().manual_seed(int(seed))
-            # Trim prompts to avoid CLIP truncation warnings (77 token max incl. specials)
-            prompt_use = self._trim_prompt(prompt)
-            neg_use = self._trim_prompt(negative_prompt if negative_prompt else None)
             kwargs = dict(
                 prompt=prompt_use,
                 negative_prompt=neg_use if neg_use else None,
-                image=pil_img,
-                mask_image=pil_mask,
-                height=pil_img.height,
-                width=pil_img.width,
+                image=img01,
+                mask_image=mask01,
                 num_inference_steps=int(steps) if steps is not None else self.steps,
                 guidance_scale=float(guidance_scale) if guidance_scale is not None else self.guidance_scale,
                 generator=gen,
+                output_type="pt",
+                return_dict=True,
             )
-            # Some inpaint pipelines support strength; pass if provided
             if strength is not None:
                 try:
                     kwargs["strength"] = float(strength)
                 except Exception:
                     pass
-            out = self.pipe(**kwargs).images[0]
-            out_t = torch.from_numpy(np.array(out)).permute(2, 0, 1).float() / 255.0
-            out_t = out_t * 2 - 1  # to [-1,1]
-            out_t = out_t.to(img.device)
+            out = self.pipe(**kwargs).images  # torch.Tensor [B, C, H, W] in [0,1]
+            out = out.to(img.device)
+            out_t = out * 2 - 1  # to [-1,1]
             # compose with original to ensure background invariance
-            composed = img[i] * (1 - mask[i]) + out_t * mask[i]
-            outs.append(composed)
-        return torch.stack(outs, dim=0)
+            composed = img * (1 - mask) + out_t * mask
+            return composed
+        else:
+            # Fast path with PIL + no grad for inference/validation
+            b = img.size(0)
+            outs: List[torch.Tensor] = []
+            with torch.no_grad():
+                for i in range(b):
+                    pil_img = Image.fromarray(denorm_to_uint8(img[i]))
+                    pil_mask = Image.fromarray((mask[i].squeeze(0).clamp(0, 1).detach().cpu().numpy() * 255.0).astype(np.uint8))
+                    # Optional deterministic seed
+                    gen = None
+                    if seed is not None:
+                        try:
+                            gen = torch.Generator(device=self.device).manual_seed(int(seed))
+                        except Exception:
+                            gen = torch.Generator().manual_seed(int(seed))
+                    kwargs = dict(
+                        prompt=prompt_use,
+                        negative_prompt=neg_use if neg_use else None,
+                        image=pil_img,
+                        mask_image=pil_mask,
+                        height=pil_img.height,
+                        width=pil_img.width,
+                        num_inference_steps=int(steps) if steps is not None else self.steps,
+                        guidance_scale=float(guidance_scale) if guidance_scale is not None else self.guidance_scale,
+                        generator=gen,
+                    )
+                    if strength is not None:
+                        try:
+                            kwargs["strength"] = float(strength)
+                        except Exception:
+                            pass
+                    out = self.pipe(**kwargs).images[0]
+                    out_t = torch.from_numpy(np.array(out)).permute(2, 0, 1).float() / 255.0
+                    out_t = out_t * 2 - 1  # to [-1,1]
+                    out_t = out_t.to(img.device)
+                    composed = img[i] * (1 - mask[i]) + out_t * mask[i]
+                    outs.append(composed)
+            return torch.stack(outs, dim=0)
 
 
 class GeneratorWrapper(nn.Module):
