@@ -179,18 +179,15 @@ class DiffusersInpaintBackend(nn.Module):
                         raise TypeError(f"Failed to construct LoRA attention processor with any known signature (last error: {last_err})")
                     return obj
 
-                # Map each attention processor name to an appropriate LoRA processor
-                lora_attn_procs = {}
-                for name in list(self.pipe.unet.attn_processors.keys()):
-                    # name examples:
-                    #  'down_blocks.0.attentions.0.transformer_blocks.0.attn1.processor'
-                    #  'mid_block.attentions.0.transformer_blocks.0.attn2.processor'
+                # Build a full mapping covering all attention processors: keep originals for unselected keys
+                all_keys = list(self.pipe.unet.attn_processors.keys())
+                new_procs = dict(self.pipe.unet.attn_processors)
+                selected = 0
+                for name in all_keys:
                     unet_scoped_name = f"unet.{name}"
+                    # Respect learnable filter if provided
                     if len(learnable) > 0 and not any(patt in unet_scoped_name for patt in learnable):
-                        # skip layers not selected by user patterns
                         continue
-
-                    # Determine cross_attention_dim and hidden_size per block
                     cross_attention_dim = None if name.endswith("attn1.processor") else self.pipe.unet.config.cross_attention_dim
                     if name.startswith("mid_block"):
                         hidden_size = self.pipe.unet.config.block_out_channels[-1]
@@ -201,17 +198,16 @@ class DiffusersInpaintBackend(nn.Module):
                         block_id = int(name[len("down_blocks."):].split(".")[0])
                         hidden_size = self.pipe.unet.config.block_out_channels[block_id]
                     else:
-                        # default fallback
                         hidden_size = self.pipe.unet.config.block_out_channels[0]
-
                     try:
-                        lora_attn_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
+                        new_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
+                        selected += 1
                     except Exception as e:
                         print(f"[LoRA][SKIP] could not create processor for {name}: {e}")
 
-                if len(lora_attn_procs) == 0:
-                    # If user patterns filter everything out, fallback to enabling all
-                    for name in list(self.pipe.unet.attn_processors.keys()):
+                if selected == 0:
+                    # If filter eliminated all, attempt to LoRA-ize all keys
+                    for name in all_keys:
                         cross_attention_dim = None if name.endswith("attn1.processor") else self.pipe.unet.config.cross_attention_dim
                         if name.startswith("mid_block"):
                             hidden_size = self.pipe.unet.config.block_out_channels[-1]
@@ -224,12 +220,13 @@ class DiffusersInpaintBackend(nn.Module):
                         else:
                             hidden_size = self.pipe.unet.config.block_out_channels[0]
                         try:
-                            lora_attn_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
+                            new_procs[name] = _make_lora_proc(hidden_size, cross_attention_dim, r)
                         except Exception as e:
                             print(f"[LoRA][SKIP] could not create processor for {name}: {e}")
+                    selected = len(all_keys)
 
-                # Set LoRA processors into the UNet
-                self.pipe.unet.set_attn_processor(lora_attn_procs)
+                # Set processors: full-size mapping prevents size mismatch errors
+                self.pipe.unet.set_attn_processor(new_procs)
 
                 if AttnProcsLayers is not None:
                     lora_layers = AttnProcsLayers(self.pipe.unet.attn_processors)
