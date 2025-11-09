@@ -199,12 +199,22 @@ class AnonyLightningModule(pl.LightningModule):
                     recon = F.l1_loss(fake, images)
                     loss = loss + 0.01 * recon
             self.manual_backward(loss)
-            # optional grad clip
+            # optional grad clip (clip only trainable generator params to avoid empty-generator warning)
             clip_val = float(self.cfg.get("grad", {}).get("clip_norm", 0.0) or 0.0)
             if clip_val > 0:
-                torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_norm=clip_val)
+                try:
+                    gen_params_list = list(self.generator.trainable_parameters())
+                    if len(gen_params_list) == 0:
+                        gen_params_list = list(self.generator.parameters())
+                    if len(gen_params_list) > 0:
+                        torch.nn.utils.clip_grad_norm_(gen_params_list, max_norm=clip_val)
+                except Exception:
+                    pass
                 if self.disc is not None:
-                    torch.nn.utils.clip_grad_norm_(self.disc.parameters(), max_norm=clip_val)
+                    try:
+                        torch.nn.utils.clip_grad_norm_(self.disc.parameters(), max_norm=clip_val)
+                    except Exception:
+                        pass
             opt_gen.step()
             self.log("train/l1", float(l1.detach().cpu()), prog_bar=True, on_step=True)
             self.log("train/perc", float(perc.detach().cpu()), prog_bar=False, on_step=True)
