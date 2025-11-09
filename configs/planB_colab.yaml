@@ -111,7 +111,7 @@ loss:
 train:
   epochs: 1
   batch_size: 2            # T4/GPU内存紧张可降至1；A100可升至4
-  num_workers: 1
+  num_workers: 8           # 提升到 8，加快 A100 数据读取
   persistent_workers: false
   prefetch_factor: 2
   grad_accum_steps: 1      # 如果 batch_size=1，可设为2 来提升有效批次
